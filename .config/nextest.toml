@@ -1,0 +1,18 @@
+# cargo-nextest runs each test in its own process, in parallel across all
+# test binaries. It does not run doctests: run `cargo test --doc` for those.
+
+[profile.ci]
+# Report every failure in one run instead of stopping at the first.
+fail-fast = false
+
+# The real-image tests read the assemblies of the .NET runtime of the host,
+# and the default run ignores them. Each test fails when the host has no
+# runtime under `DOTNET_ROOT` (or `C:/Program Files/dotnet`). Run them with
+# the `real-images` cargo profile of `Cargo.toml` (optimized code with debug
+# assertions):
+# `cargo nextest run --workspace --cargo-profile real-images --profile real-images --run-ignored only`.
+# Add every new real-image test to this filter.
+[profile.real-images]
+default-filter = "binary_id(clrmeta::real_images)"
+success-output = "immediate"
+slow-timeout = { period = "60s", terminate-after = 10 }

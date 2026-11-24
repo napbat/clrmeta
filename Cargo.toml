@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = ["crates/clrmeta", "crates/clrmeta-model"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/napbat/clrmeta"
+authors = ["coconutbird"]
+rust-version = "1.99"
+keywords = ["clr", "dotnet", "metadata", "ecma-335", "cil"]
+categories = ["parsing", "encoding", "no-std"]
+
+[workspace.dependencies]
+clrmeta-model = { version = "0.1.0", path = "crates/clrmeta-model" }
+serde = { version = "1.0.228", default-features = false, features = ["derive", "alloc"] }
+
+[workspace.lints.rust]
+warnings = { level = "deny", priority = -2 }
+unused = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+missing_docs = "deny"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+mod_module_files = "deny"
+
+[workspace.lints.rustdoc]
+all = { level = "deny", priority = -1 }
+
+# The real-image tests read every table, signature and method body of the
+# assemblies of the installed .NET runtime. Optimized code with debug
+# assertions keeps them fast and still checks overflow.
+[profile.real-images]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true

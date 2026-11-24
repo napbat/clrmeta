@@ -1,0 +1,102 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Three jobs run in parallel. `lint` holds every check that only compiles;
+# `test` runs the suite once; `real-images` runs the tests on the assemblies
+# of the .NET runtime of a Windows runner. The only feature, `serde`, is
+# additive, so the all-features run tests every line of code. The
+# default-features clippy step and the no_std checks keep the build without
+# `serde` clean.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-unknown-none
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy with default features
+        run: >-
+          cargo clippy --workspace --all-targets --
+          -D warnings -D clippy::pedantic
+
+      - name: Run Clippy with all features
+        run: >-
+          cargo clippy --workspace --all-targets --all-features --
+          -D warnings -D clippy::pedantic
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps
+
+      # A target without std fails to build if any dependency feature turns
+      # std on; the host build cannot catch that, because std is always there.
+      - name: Check the no_std build
+        run: |
+          cargo check --workspace --target x86_64-unknown-none
+          cargo check --workspace --all-features --target x86_64-unknown-none
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo nextest run --workspace --all-features --profile ci
+
+      # nextest does not run doctests.
+      - name: Run doctests
+        run: cargo test --workspace --all-features --doc
+
+  real-images:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # The runner image holds a .NET runtime under C:/Program Files/dotnet.
+      - name: Run the real-image tests
+        run: >-
+          cargo nextest run --workspace --cargo-profile real-images
+          --profile real-images --run-ignored only

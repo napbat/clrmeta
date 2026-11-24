@@ -1,0 +1,22 @@
+[package]
+name = "clrmeta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Zero-copy no_std reader and writer of ECMA-335 CLI metadata, signatures and method bodies"
+readme = "../../README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+serde = ["clrmeta-model/serde"]
+
+[dependencies]
+clrmeta-model.workspace = true

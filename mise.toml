@@ -1,0 +1,40 @@
+[tools]
+rust = { version = "stable", targets = "x86_64-unknown-none" }
+prek = "latest"
+"cargo:cargo-nextest" = "latest"
+
+# The pre-push hooks in prek.toml run these commands.
+[tasks.lint]
+description = "Formatting and Clippy with default and with all features"
+shell = "sh -c"
+run = [
+  'cargo fmt --all -- --check',
+  'cargo clippy --workspace --all-targets -- -D warnings',
+  'cargo clippy --workspace --all-targets --all-features -- -D warnings',
+]
+
+# The check list of AGENTS.md without the real images, then the two
+# repository checks of napbat/standards.
+[tasks.ci]
+description = "Every check"
+shell = "sh -c"
+run = [
+  'cargo fmt --all -- --check',
+  'cargo clippy --workspace --all-targets -- -D warnings -D clippy::pedantic',
+  'cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic',
+  'cargo nextest run --workspace --all-features',
+  'cargo test --workspace --all-features --doc',
+  'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps',
+  'cargo check --workspace --all-features --target x86_64-unknown-none',
+  'cargo check --workspace --target x86_64-unknown-none',
+  '''git ls-files '*/Cargo.toml' | xargs grep -L '^\[lints\]' | awk '{ print } END { exit NR > 0 }' ''',
+  '''git ls-files '*.rs' | xargs wc -l | awk '$2 != "total" && $1 > 1000 { print; bad = 1 } END { exit bad }' ''',
+]
+
+# The tests on the assemblies of the .NET runtime of the host.
+[tasks.real-images]
+description = "The real-image tests"
+shell = "sh -c"
+run = [
+  'cargo nextest run --workspace --cargo-profile real-images --profile real-images --run-ignored only',
+]
