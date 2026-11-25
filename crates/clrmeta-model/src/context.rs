@@ -10,9 +10,17 @@
 //! [`ENCODING`].
 //!
 //! Each list of a [`MethodTable`] is in ascending token order, so a consumer
-//! finds an entry with a binary search on its token. A relative virtual
-//! address (RVA) is an offset from the load base of the module: the consumer
-//! adds the base.
+//! finds an entry with a binary search on its token. The types of other
+//! assemblies ([`MethodTable::referenced_types`]) are in ascending name
+//! order. A relative virtual address (RVA) is an offset from the load base
+//! of the module: the consumer adds the base.
+
+mod referenced;
+
+pub use referenced::{
+    NamedMethodSig, NamedSig, ReferencedMethod, ReferencedParameter, ReferencedType,
+    UnresolvedAssembly,
+};
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -53,6 +61,16 @@ pub struct MethodTable {
     pub signatures: Vec<StandAloneSignature>,
     /// Every user string of the `#US` heap, by its `ldstr` token.
     pub strings: Vec<UserString>,
+    /// The types of other assemblies that the loader found: each type that
+    /// a `TypeRef` of the module names, and each base type and interface
+    /// of such a type, also of each base type and interface of those. The
+    /// list is in ascending order of the name, with one entry for each
+    /// name. A `TypeRef` whose type the list does not hold names a type of
+    /// an assembly that the loader did not find or did not search.
+    pub referenced_types: Vec<ReferencedType>,
+    /// Each assembly that the module references and that the loader did not
+    /// find, in token order.
+    pub unresolved_assemblies: Vec<UnresolvedAssembly>,
 }
 
 impl MethodTable {
@@ -91,6 +109,16 @@ impl MethodTable {
     pub fn string(&self, token: Token) -> Option<&UserString> {
         find(&self.strings, token, |string| string.token)
     }
+
+    /// Returns the type of another assembly of the full name `name`
+    /// ([`ReferencedType::name`]).
+    #[must_use]
+    pub fn referenced_type(&self, name: &str) -> Option<&ReferencedType> {
+        self.referenced_types
+            .binary_search_by(|entry| entry.name.as_str().cmp(name))
+            .ok()
+            .map(|index| &self.referenced_types[index])
+    }
 }
 
 /// Finds the entry of `token` in a list in ascending token order.
@@ -118,6 +146,9 @@ pub struct Method {
     pub impl_flags: u16,
     /// The method signature.
     pub signature: MethodSig,
+    /// The generic parameters of a generic method, in the order of their
+    /// numbers. The list is empty for a method that is not generic.
+    pub generic_parameters: Vec<GenericParameter>,
     /// The body of a method with Common Intermediate Language code, or
     /// `None` for a method without such a body (abstract, runtime, internal
     /// call, platform invoke or native code).
@@ -186,8 +217,14 @@ pub struct Field {
     pub name: String,
     /// The field signature.
     pub signature: FieldSig,
-    /// Whether the field is static. A `MemberRef` does not state it, so the
-    /// value is `false` for a field of another module.
+    /// Whether the field is static. A `MemberRef` does not state it: a
+    /// `MemberRef` of a type definition of the module, or of an
+    /// instantiation of one, takes the flag of the `Field` definition of
+    /// that type with the same name and signature. A `MemberRef` of a type
+    /// of another assembly is `false` until the resolution of the
+    /// references of the module finds the assembly that defines the type and
+    /// takes the flag of the field with the same name and field type. A field that no
+    /// resolution finds is `false`.
     pub is_static: bool,
 }
 
@@ -214,13 +251,50 @@ pub enum TypeKind {
         flags: u32,
         /// The base type, or the null token.
         extends: Token,
-        /// The number of generic parameters.
-        generic_param_count: u32,
+        /// The interfaces that the type implements (`InterfaceImpl`), each
+        /// a `TypeDef`, `TypeRef` or `TypeSpec` token, in table order.
+        interfaces: Vec<Token>,
+        /// The generic parameters of a generic type, in the order of their
+        /// numbers. The list is empty for a type that is not generic.
+        generic_parameters: Vec<GenericParameter>,
+        /// The explicit method implementations of the type (`MethodImpl`),
+        /// in table order.
+        method_impls: Vec<MethodImpl>,
     },
     /// A reference to a type of another scope.
     Reference,
     /// A type specification with its signature.
     Specification(TypeSig),
+}
+
+/// One explicit method implementation of a type definition (`MethodImpl`,
+/// ECMA-335 Partition II, 22.27): the method of the type that implements a
+/// virtual method of a base type or of an interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct MethodImpl {
+    /// The method that implements the declaration: a `MethodDef` or a
+    /// `MemberRef` token.
+    pub body: Token,
+    /// The virtual method that the body implements: a `MethodDef` or a
+    /// `MemberRef` token.
+    pub declaration: Token,
+}
+
+/// One generic parameter of a type or a method definition (`GenericParam`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct GenericParameter {
+    /// The name of the parameter.
+    pub name: String,
+    /// The `GenericParamAttributes` flags: the variance and the special
+    /// constraints (reference type, value type, default constructor).
+    pub flags: u16,
+    /// The types that constrain the parameter (`GenericParamConstraint`),
+    /// each a `TypeDef`, `TypeRef` or `TypeSpec` token, in table order. A
+    /// type that the parameter must derive from and an interface that it
+    /// must implement are both constraints.
+    pub constraints: Vec<Token>,
 }
 
 /// The signature of one `StandAloneSig` row.
@@ -267,10 +341,44 @@ impl UserString {
 
 #[cfg(test)]
 mod tests {
+    use alloc::borrow::ToOwned;
     use alloc::vec;
+    use alloc::vec::Vec;
 
-    use super::{MethodTable, UserString};
+    use super::{MethodTable, NamedSig, ReferencedType, UserString};
     use crate::token::{TableId, Token};
+
+    #[test]
+    fn a_lookup_finds_a_referenced_type_by_its_name() {
+        let row = |name: &str, extends: Option<&str>| ReferencedType {
+            name: name.to_owned(),
+            assembly: "System.Private.CoreLib".to_owned(),
+            flags: 0,
+            extends: extends.map(|base| NamedSig::Named {
+                name: base.to_owned(),
+                value_type: false,
+                arguments: Vec::new(),
+            }),
+            interfaces: Vec::new(),
+            generic_parameters: Vec::new(),
+            underlying: None,
+            virtual_methods: Vec::new(),
+        };
+        let table = MethodTable {
+            referenced_types: vec![
+                row("System.Exception", Some("System.Object")),
+                row("System.FormatException", Some("System.SystemException")),
+                row("System.SystemException", Some("System.Exception")),
+            ],
+            ..MethodTable::default()
+        };
+
+        let found = table
+            .referenced_type("System.FormatException")
+            .expect("the row is in the list");
+        assert_eq!(found.name, "System.FormatException");
+        assert_eq!(table.referenced_type("System.ArgumentException"), None);
+    }
 
     #[test]
     fn a_lookup_finds_an_entry_by_its_token() {
