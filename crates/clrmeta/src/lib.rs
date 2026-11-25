@@ -80,4 +80,4 @@ pub use signature::Signature;
 pub use tables::*;
 pub use token::{Rid, Token, USER_STRING_TOKEN_TYPE};
 pub use validate::{Issue, Location};
-pub use write::{DEFAULT_SORTED, MetadataBuilder, StreamSlot};
+pub use write::{DEFAULT_SORTED, MetadataBuilder, MethodRenumbering, RowReference, StreamSlot};

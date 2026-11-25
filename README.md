@@ -92,7 +92,14 @@ fn list_methods<'a>(
 ```
 
 `MetadataBuilder::from_metadata` copies parsed metadata, and `MetadataBuilder::write` writes it
-back. A copy that changes nothing writes the same bytes.
+back. A copy that changes nothing writes the same bytes. The builder adds rows and heap entries
+for an edit: `add_assembly_ref`, `add_type_ref`, `add_type_spec`, `add_member_ref`,
+`add_method_spec`, `add_stand_alone_sig` and `UserStringsHeapBuilder::add_units` reuse an equal
+entry. `add_method` adds a method to the end of the methods of its type; the later methods get
+the next row numbers in every table, the sorted tables are sorted again, and
+`MethodRenumbering` gives the new token of each old token. `body::map_tokens` writes the new
+tokens into the code of a method body, and `signature::map_type_indices` writes the type indices
+of a signature blob again.
 
 ## Checks
 

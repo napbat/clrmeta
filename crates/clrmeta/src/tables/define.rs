@@ -153,6 +153,18 @@ macro_rules! define_tables {
                 };
                 u32::try_from(len).unwrap_or(u32::MAX)
             }
+
+            /// Replaces the row at the 0-based `position` of the table of
+            /// `row`. Returns `false` when the table has no such row.
+            pub fn set_any(&mut self, position: usize, row: AnyRow) -> bool {
+                match row {
+                    $(AnyRow::$id(row) => self
+                        .$rows
+                        .get_mut(position)
+                        .map(|slot| *slot = row)
+                        .is_some(),)+
+                }
+            }
         }
     };
 }

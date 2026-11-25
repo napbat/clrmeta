@@ -25,6 +25,35 @@ fn a_written_module_reads_back_and_writes_the_same_bytes() {
 }
 
 #[test]
+fn metadata_without_a_user_string_stream_gets_one_for_a_new_string() {
+    let mut builder = sample();
+    builder
+        .streams
+        .retain(|slot| *slot != StreamSlot::UserStrings);
+    builder.user_strings = crate::heaps::UserStringsHeapBuilder::default();
+    let bytes = builder.write().unwrap();
+    let md = Metadata::parse(&bytes).unwrap();
+    assert!(md.user_strings().data().is_empty(), "no string, no stream");
+
+    let mut again = MetadataBuilder::from_metadata(&md).unwrap();
+    let token = again.user_strings.add("excellent").unwrap();
+    let bytes = again.write().unwrap();
+    let md = Metadata::parse(&bytes).unwrap();
+    let names: alloc::vec::Vec<&[u8]> = md.root().streams.iter().map(|s| s.name).collect();
+    let strings = names.iter().position(|name| *name == b"#Strings").unwrap();
+    assert_eq!(names[strings + 1], b"#US", "{names:?}");
+    assert_eq!(
+        md.user_strings()
+            .get(token.row())
+            .unwrap()
+            .to_string()
+            .unwrap(),
+        "excellent"
+    );
+    assert_eq!(md.validate(), []);
+}
+
+#[test]
 fn the_widths_grow_with_the_heaps_and_the_tables() {
     let mut builder = sample();
     for row in 0..70_000u32 {

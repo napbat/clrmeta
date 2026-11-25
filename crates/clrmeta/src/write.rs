@@ -1,6 +1,7 @@
 //! The writer of metadata: owned rows and heaps to the bytes of a metadata
 //! root with its streams.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 use crate::bytes::{pad4, put_index};
@@ -184,10 +185,30 @@ impl MetadataBuilder {
         })
     }
 
-    /// Returns the name of each stream in output order.
-    fn stream_names(&self) -> impl Iterator<Item = &[u8]> {
+    /// Returns the slot of each stream in output order. Metadata without a
+    /// `#US` stream, such as the output of an obfuscator that encrypted
+    /// every string, gets one after `#Strings` (the order of ECMA-335
+    /// II.24.2.2) when strings were added to the heap.
+    fn slots(&self) -> Cow<'_, [StreamSlot]> {
+        if self.user_strings.as_bytes().len() <= 1
+            || self.streams.contains(&StreamSlot::UserStrings)
+        {
+            return Cow::Borrowed(&self.streams);
+        }
+        let mut slots = self.streams.clone();
+        let at = slots
+            .iter()
+            .position(|slot| *slot == StreamSlot::Strings)
+            .or_else(|| slots.iter().position(|slot| *slot == StreamSlot::Tables))
+            .map_or(slots.len(), |at| at + 1);
+        slots.insert(at, StreamSlot::UserStrings);
+        Cow::Owned(slots)
+    }
+
+    /// Returns the name of each stream of `slots`.
+    fn stream_names<'s>(&self, slots: &'s [StreamSlot]) -> impl Iterator<Item = &'s [u8]> {
         let tables_name: &[u8] = if self.uncompressed { b"#-" } else { b"#~" };
-        self.streams.iter().map(move |slot| match slot {
+        slots.iter().map(move |slot| match slot {
             StreamSlot::Tables => tables_name,
             StreamSlot::Strings => b"#Strings",
             StreamSlot::UserStrings => b"#US",
@@ -205,15 +226,16 @@ impl MetadataBuilder {
     /// Returns an error when a row holds a value that its column cannot
     /// hold, or a stream is larger than 4 GiB.
     pub fn write(&self) -> Result<Vec<u8>> {
-        let names: Vec<&[u8]> = self.stream_names().collect();
+        let slots = self.slots();
+        let names: Vec<&[u8]> = self.stream_names(&slots).collect();
         let wide = StreamSelection::of(&names).jtd.is_some();
         let tables = self.write_tables(wide)?;
         let pdb = self.pdb.as_ref().map(PdbStream::write);
         // Each part: the name, the bytes of the stream, and the bytes after
         // it that its header does not count (the end of the last GUID of a
         // #GUID heap whose size is not a multiple of 16).
-        let mut parts: Vec<(&[u8], &[u8], &[u8])> = Vec::with_capacity(self.streams.len());
-        for (slot, name) in self.streams.iter().zip(self.stream_names()) {
+        let mut parts: Vec<(&[u8], &[u8], &[u8])> = Vec::with_capacity(slots.len());
+        for (slot, &name) in slots.iter().zip(&names) {
             let (data, tail): (&[u8], &[u8]) = match slot {
                 StreamSlot::Tables => (&tables, &[]),
                 StreamSlot::Strings => (self.strings.as_bytes(), &[]),
@@ -337,5 +359,8 @@ fn to_u32(value: usize) -> Result<u32> {
     })
 }
 
+mod rows;
 #[cfg(test)]
 mod tests;
+
+pub use rows::{MethodRenumbering, RowReference};

@@ -18,8 +18,8 @@
 mod referenced;
 
 pub use referenced::{
-    NamedMethodSig, NamedSig, ReferencedMethod, ReferencedParameter, ReferencedType,
-    UnresolvedAssembly,
+    NamedMethodSig, NamedSig, ReferencedField, ReferencedMethod, ReferencedParameter,
+    ReferencedType, UnresolvedAssembly,
 };
 
 use alloc::string::String;
@@ -33,11 +33,11 @@ use crate::signature::{FieldSig, LocalSig, MethodSig, TypeSig};
 use crate::token::Token;
 
 /// The identifier of the method-context encoding: a [`MethodTable`] in the
-/// `postcard` format, version 1.
+/// `postcard` format, version 4.
 ///
-/// A change of a type of this module that changes the encoded bytes needs a
-/// new version number.
-pub const ENCODING: &str = "cil.methods/1";
+/// A change of a type of this module that changes the encoded bytes, or the
+/// meaning of a field, needs a new version number.
+pub const ENCODING: &str = "cil.methods/4";
 
 /// The method context of one module.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -71,6 +71,16 @@ pub struct MethodTable {
     /// Each assembly that the module references and that the loader did not
     /// find, in token order.
     pub unresolved_assemblies: Vec<UnresolvedAssembly>,
+    /// The simple name of the assembly that the module belongs to, as the
+    /// first `Assembly` row states it, or empty for a module without one.
+    /// A runtime that runs the code of several assemblies tells their types
+    /// apart by it.
+    pub assembly: String,
+    /// The relative virtual address (RVA) of the initial data of each field
+    /// definition that the `FieldRVA` table names, by field token, in token
+    /// order: the bytes of a static field such as the initial data of an
+    /// array (`RuntimeHelpers.InitializeArray`).
+    pub field_rvas: Vec<(Token, u32)>,
 }
 
 impl MethodTable {
@@ -80,10 +90,39 @@ impl MethodTable {
         find(&self.methods, token, |method| method.token)
     }
 
+    /// Returns the RVA of the initial data of the field definition `token`,
+    /// when the `FieldRVA` table names it.
+    #[must_use]
+    pub fn field_rva(&self, token: Token) -> Option<u32> {
+        self.field_rvas
+            .binary_search_by_key(&token.0, |(field, _)| field.0)
+            .ok()
+            .map(|position| self.field_rvas[position].1)
+    }
+
     /// Returns the method reference of `token`.
     #[must_use]
     pub fn method_reference(&self, token: Token) -> Option<&MethodReference> {
         find(&self.method_references, token, |reference| reference.token)
+    }
+
+    /// Returns the method reference that the loader states at `address`
+    /// ([`MethodReference::address`]), or `None` when no reference lies
+    /// there.
+    #[must_use]
+    pub fn reference_at(&self, address: u64) -> Option<&MethodReference> {
+        self.method_references
+            .iter()
+            .find(|reference| reference.address == Some(address))
+    }
+
+    /// Returns the method definition that the loader states at `address`
+    /// ([`Method::address`]), or `None` when no method lies there.
+    #[must_use]
+    pub fn method_at(&self, address: u64) -> Option<&Method> {
+        self.methods
+            .iter()
+            .find(|method| method.address == Some(address))
     }
 
     /// Returns the field of `token`.
@@ -153,6 +192,14 @@ pub struct Method {
     /// `None` for a method without such a body (abstract, runtime, internal
     /// call, platform invoke or native code).
     pub body: Option<MethodBody>,
+    /// The address at which the loader of the module states a method
+    /// without a CIL body that code can call: a platform invoke method is
+    /// an import of its native function, and a method that the runtime
+    /// implements (an internal call or a runtime method) is an import of the
+    /// runtime. A call names its callee by that address. The metadata holds
+    /// no such address, so a reader of the metadata states `None`, and the
+    /// loader that states the imports fills it.
+    pub address: Option<u64>,
 }
 
 /// The body of one method with Common Intermediate Language code.
@@ -201,6 +248,15 @@ pub struct MethodReference {
     /// The type arguments of a `MethodSpec`. The list is empty for a
     /// `MemberRef`.
     pub instantiation: Vec<TypeSig>,
+    /// The address at which the loader of the module states the method that
+    /// the reference calls, when no method definition of this module is
+    /// that callee as it stands: the import of a method of another scope,
+    /// or the instantiation of a generic method, or of a method of a generic
+    /// type instance, that this module defines. A call names its callee by
+    /// that address, so the instantiation stays known. The metadata holds
+    /// no such address, so a reader of the metadata states `None`, and the
+    /// loader that states the references fills it.
+    pub address: Option<u64>,
 }
 
 /// One field: a `Field` definition or a `MemberRef` that names a field.
@@ -226,6 +282,11 @@ pub struct Field {
     /// takes the flag of the field with the same name and field type. A field that no
     /// resolution finds is `false`.
     pub is_static: bool,
+    /// The offset in bytes that the `FieldLayout` table states for a `Field`
+    /// definition, from the start of the fields of its type, or `None` when
+    /// the table has no row for it and for a `MemberRef`. A type with
+    /// explicit layout states an offset for each instance field.
+    pub offset: Option<u32>,
 }
 
 /// One type: a `TypeDef`, `TypeRef` or `TypeSpec`.
@@ -260,11 +321,29 @@ pub enum TypeKind {
         /// The explicit method implementations of the type (`MethodImpl`),
         /// in table order.
         method_impls: Vec<MethodImpl>,
+        /// The packing size and the class size that the `ClassLayout` table
+        /// states for the type, or `None` when the table has no row for it.
+        /// The layout kind (automatic, sequential or explicit) is in
+        /// `flags`.
+        layout: Option<ClassLayout>,
     },
     /// A reference to a type of another scope.
     Reference,
     /// A type specification with its signature.
     Specification(TypeSig),
+}
+
+/// One `ClassLayout` row (ECMA-335 Partition II, 22.8): the packing size
+/// and the class size of a type with sequential or explicit layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ClassLayout {
+    /// The packing size: the largest alignment of a field in bytes, or zero
+    /// for the default alignment of each field.
+    pub packing: u16,
+    /// The size of an instance in bytes, or zero when the row does not
+    /// state it. The size of an instance is at least this size.
+    pub class_size: u32,
 }
 
 /// One explicit method implementation of a type definition (`MethodImpl`,
@@ -363,6 +442,8 @@ mod tests {
             generic_parameters: Vec::new(),
             underlying: None,
             virtual_methods: Vec::new(),
+            fields: Vec::new(),
+            layout: None,
         };
         let table = MethodTable {
             referenced_types: vec![

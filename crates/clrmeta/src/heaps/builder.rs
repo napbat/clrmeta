@@ -157,12 +157,14 @@ impl BlobHeapBuilder {
 #[derive(Debug, Clone)]
 pub struct UserStringsHeapBuilder {
     data: Vec<u8>,
+    known: Option<BTreeMap<Vec<u16>, u32>>,
 }
 
 impl Default for UserStringsHeapBuilder {
     fn default() -> Self {
         Self {
             data: alloc::vec![0],
+            known: None,
         }
     }
 }
@@ -176,15 +178,42 @@ impl UserStringsHeapBuilder {
         }
         Self {
             data: heap.data().to_vec(),
+            known: None,
         }
     }
 
-    /// Adds a string and returns its `ldstr` token.
+    /// Adds a string and returns its `ldstr` token. An equal string is
+    /// reused.
     ///
     /// # Errors
     ///
     /// Returns an error when the heap passes the 24-bit offset of a token.
     pub fn add(&mut self, value: &str) -> Result<Token> {
+        let units: Vec<u16> = value.encode_utf16().collect();
+        self.add_units(&units)
+    }
+
+    /// Adds a string of UTF-16 code units, which can hold an unpaired
+    /// surrogate, and returns its `ldstr` token. An equal string is reused;
+    /// offset 0 is never reused, because the runtime reads no entry there.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the heap passes the 24-bit offset of a token.
+    pub fn add_units(&mut self, units: &[u16]) -> Result<Token> {
+        let data = &self.data;
+        let known = self.known.get_or_insert_with(|| {
+            let mut known = BTreeMap::new();
+            for (offset, entry) in &UserStringsHeap::new(data) {
+                if offset != 0 {
+                    known.entry(entry.code_units().collect()).or_insert(offset);
+                }
+            }
+            known
+        });
+        if let Some(&offset) = known.get(units) {
+            return Ok(Token::user_string(offset));
+        }
         let offset = offset_of(self.data.len(), "#US")?;
         if offset > 0x00FF_FFFF {
             return Err(Error::Overflow {
@@ -192,17 +221,17 @@ impl UserStringsHeapBuilder {
                 value: u64::from(offset),
             });
         }
-        let units: Vec<u16> = value.encode_utf16().collect();
         let len = offset_of(units.len() * 2 + 1, "#US")?;
         put_compressed_u32(&mut self.data, len, "#US")?;
         let mut flag = 0;
-        for unit in units {
+        for &unit in units {
             self.data.extend_from_slice(&unit.to_le_bytes());
             if needs_flag(unit) {
                 flag = 1;
             }
         }
         self.data.push(flag);
+        known.insert(units.to_vec(), offset);
         Ok(Token::user_string(offset))
     }
 
@@ -324,5 +353,29 @@ mod tests {
         assert_eq!(builder.tail(), &[] as &[u8]);
         let heap = GuidHeap::new(builder.as_bytes());
         assert_eq!(heap.get(GuidIndex(1)).unwrap(), Some(Guid(bytes)));
+    }
+
+    #[test]
+    fn a_user_string_of_code_units_is_added_once() {
+        // The heap holds "Hi" at offset 1.
+        let existing = [0x00, 0x05, b'H', 0, b'i', 0, 0];
+        let mut user = UserStringsHeapBuilder::from_heap(&UserStringsHeap::new(&existing));
+        let hi: Vec<u16> = "Hi".encode_utf16().collect();
+        assert_eq!(user.add_units(&hi).unwrap(), Token::user_string(1));
+        assert_eq!(user.add("Hi").unwrap(), Token::user_string(1));
+        // An unpaired surrogate stays a code unit and sets the final byte.
+        let lone = user.add_units(&[0x0073, 0xD800]).unwrap();
+        assert_eq!(lone, Token::user_string(7));
+        assert_eq!(user.add_units(&[0x0073, 0xD800]).unwrap(), lone);
+        let heap = UserStringsHeap::new(user.as_bytes());
+        let read = heap.get_token(lone).unwrap();
+        assert_eq!(read.code_units().collect::<Vec<_>>(), [0x0073, 0xD800]);
+        assert_eq!(read.flag(), 1);
+        // The empty string gets an entry of its own, not offset 0.
+        let empty = user.add("").unwrap();
+        assert_ne!(empty, Token::user_string(0));
+        let heap = UserStringsHeap::new(user.as_bytes());
+        assert!(heap.get(0).unwrap().is_empty());
+        assert!(heap.get_token(empty).unwrap().is_empty());
     }
 }

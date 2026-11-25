@@ -8,12 +8,14 @@
 use alloc::vec::Vec;
 
 pub use clrmeta_model::{ExceptionClause, ExceptionClauseKind};
+pub use operands::{map_tokens, token_operands};
 
 use crate::bytes::Cursor;
 use crate::error::{Error, Result};
 use crate::token::Token;
 
 mod encode;
+mod operands;
 mod sections;
 mod validate;
 

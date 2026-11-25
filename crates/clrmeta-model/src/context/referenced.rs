@@ -3,9 +3,9 @@
 //!
 //! The metadata of a module names a type of another assembly only by a
 //! `TypeRef`: its scope and its name. It does not state the base type, the
-//! interfaces or the kind of such a type. A loader that finds the assembly
-//! that defines the type reads these facts there and states them as a
-//! [`ReferencedType`]. A token of that assembly has no meaning in the
+//! interfaces, the kind or the fields of such a type. A loader that finds the
+//! assembly that defines the type reads these facts there and states them as
+//! a [`ReferencedType`]. A token of that assembly has no meaning in the
 //! module, so each type of such a row is a [`NamedSig`]: a signature that
 //! names each type by its full name.
 
@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use super::ClassLayout;
 use crate::signature::{ArrayShape, TypeSig};
 use crate::token::Token;
 
@@ -49,6 +50,34 @@ pub struct ReferencedType {
     /// facts of the slots that a type of the module can override or that a
     /// virtual call can reach (ECMA-335 Partition II, 10.3).
     pub virtual_methods: Vec<ReferencedMethod>,
+    /// The instance fields that the type itself defines, in declaration
+    /// order (the order of the `Field` table): the facts that place the
+    /// fields of an instance (ECMA-335 Partition II, 10.7). The list does
+    /// not hold a static field or a field of a base type.
+    pub fields: Vec<ReferencedField>,
+    /// The packing size and the class size that the `ClassLayout` table
+    /// states for the type, or `None` when the table has no row for it.
+    /// The layout kind (automatic, sequential or explicit) is in
+    /// [`flags`](Self::flags).
+    pub layout: Option<ClassLayout>,
+}
+
+/// One instance field of a [`ReferencedType`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ReferencedField {
+    /// The name of the field, without the name of its type.
+    pub name: String,
+    /// The `FieldAttributes` flags.
+    pub flags: u16,
+    /// The type of the field. A generic parameter of the type (`!0`) stays
+    /// its number.
+    pub field_type: NamedSig,
+    /// The offset in bytes that the `FieldLayout` table states for the
+    /// field, from the start of the fields of the type, or `None` when the
+    /// table has no row for it. A type with explicit layout states an
+    /// offset for each instance field.
+    pub offset: Option<u32>,
 }
 
 /// One virtual method of a [`ReferencedType`].

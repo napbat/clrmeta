@@ -12,9 +12,11 @@ use crate::error::Result;
 
 mod decode;
 mod encode;
+mod rewrite;
 
 pub(crate) use decode::SigReader;
 pub(crate) use encode::SigWriter;
+pub use rewrite::{BlobGrammar, map_type_indices};
 
 /// A signature that parses from a blob and encodes to a blob.
 pub trait Signature: Sized {
