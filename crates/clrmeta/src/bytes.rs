@@ -166,8 +166,8 @@ impl<'a> Cursor<'a> {
         Ok(value.cast_signed())
     }
 
-    /// Reads a UTF-8 string that ends at a zero byte, and the zero byte.
-    pub(crate) fn zero_terminated(&mut self) -> Result<&'a str> {
+    /// Reads the bytes up to a zero byte, and the zero byte.
+    pub(crate) fn zero_terminated_bytes(&mut self) -> Result<&'a [u8]> {
         let start = self.pos;
         let len = self
             .rest()
@@ -180,7 +180,7 @@ impl<'a> Cursor<'a> {
             })?;
         let bytes = self.bytes(len)?;
         self.pos += 1;
-        core::str::from_utf8(bytes).map_err(|_| self.malformed_at(start, "the string is not UTF-8"))
+        Ok(bytes)
     }
 }
 
@@ -356,8 +356,10 @@ mod tests {
                 needed: 4
             })
         );
-        assert!(Cursor::new(b"abc", "s").zero_terminated().is_err());
-        assert_eq!(Cursor::new(b"ab\0", "s").zero_terminated().unwrap(), "ab");
+        assert!(Cursor::new(b"abc", "s").zero_terminated_bytes().is_err());
+        let mut names = Cursor::new(b"a\xFF\0b", "s");
+        assert_eq!(names.zero_terminated_bytes().unwrap(), b"a\xFF");
+        assert_eq!(names.position(), 3);
         let mut out = vec![1];
         pad4(&mut out);
         assert_eq!(out.len(), 4);

@@ -1,0 +1,184 @@
+== sample on CoreCLR
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== sample on .NET Framework
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== confuserex-invalid-metadata on CoreCLR
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== confuserex-invalid-metadata on .NET Framework
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== confuserex-anti-tamper on CoreCLR
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== confuserex-anti-tamper on .NET Framework
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== confuserex-maximum on CoreCLR
+exit 82
+Unhandled exception. System.BadImageFormatException: Enclosing type(s) not found for type '?????????????????????????????????????????' in assembly 'sample, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null'.
+== confuserex-maximum on .NET Framework
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== heaps-after on CoreCLR
+exit 0
+CHECKSUM 17
+type Cercle
+constant 9
+mvid 5d472c0f-3a4c-450d-9fff-59249d94c5b8
+key 0
+== heaps-after on .NET Framework
+exit 0
+CHECKSUM 17
+type Cercle
+constant 9
+mvid 5d472c0f-3a4c-450d-9fff-59249d94c5b8
+key 0
+== heaps-schema on CoreCLR
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== heaps-schema on .NET Framework
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== heaps-dash-case on CoreCLR
+exit 0
+checksum 17
+type Cercle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== heaps-dash-case on .NET Framework
+exit 0
+checksum 17
+type Cercle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== stream-names on CoreCLR
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== stream-names on .NET Framework
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== header-quirks on CoreCLR
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== header-quirks on .NET Framework
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== version-non-utf8 on CoreCLR
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== version-non-utf8 on .NET Framework
+timeout
+== names on CoreCLR
+exit 0
+checksum 17
+type C?rcle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== names on .NET Framework
+exit 0
+checksum 17
+type C?rcle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== rows on CoreCLR
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== rows on .NET Framework
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== bodies on CoreCLR
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== bodies on .NET Framework
+exit 0
+checksum 17
+type Circle
+constant 2
+mvid 5d472cf0-3a4c-450d-9fff-59249d94c5b8
+key 0
+== bodies-hidden-eh on CoreCLR
+exit 148
+Unhandled exception. System.DivideByZeroException: Attempted to divide by zero.
+   at Fixture.Program.Divide(Int32 a, Int32 b)
+   at Fixture.Program.Main(String[] args)
+== bodies-hidden-eh on .NET Framework
+exit 3221225620
+
+Unhandled Exception: System.DivideByZeroException: Attempted to divide by zero.
+   at Fixture.Program.Divide(Int32 a, Int32 b)
+   at Fixture.Program.Main(String[] args)

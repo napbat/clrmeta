@@ -206,6 +206,9 @@ fn check_bodies(pe: &PeFile, md: &Metadata<'_>, counts: &mut Counts, problems: &
             if let Err(error) = md.locals_of(&body) {
                 problems.add(format!("locals of {}: {error}", rid.token()));
             }
+            for error in body.validate_at(row.rva) {
+                problems.add(format!("body of {}: {error}", rid.token()));
+            }
             let original = pe.read(row.rva, body.size).unwrap_or_default();
             match body.encode() {
                 Ok(bytes) if bytes == original => {}
@@ -356,13 +359,7 @@ pub fn check(pe: &PeFile, md: &Metadata<'_>, index: &EnumIndex) -> (Counts, Prob
         Err(error) => problems.add(format!("rows: {error}")),
     }
     for issue in md.validate() {
-        problems.add(format!(
-            "validate: {} row {} column {}: {}",
-            issue.table.name(),
-            issue.row,
-            issue.column,
-            issue.error
-        ));
+        problems.add(format!("validate: {:?}: {}", issue.location, issue.error));
     }
     check_signatures(md, &mut counts, &mut problems);
     check_bodies(pe, md, &mut counts, &mut problems);

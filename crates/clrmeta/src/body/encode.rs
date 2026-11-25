@@ -40,7 +40,10 @@ pub(crate) fn encode(body: &MethodBody<'_>) -> Result<Vec<u8>> {
         }
         HeaderFormat::Fat => {
             let dwords = body.header_size / 4;
-            if !body.header_size.is_multiple_of(4) || !(3..16).contains(&dwords) {
+            let fits = body.header_size.is_multiple_of(4)
+                && (3..16).contains(&dwords)
+                && body.extra_header.len() <= body.header_size - 12;
+            if !fits {
                 return Err(overflow(body.header_size));
             }
             let mut flags = body.flags & 0x0FFF & !MORE_SECTS;
@@ -55,6 +58,7 @@ pub(crate) fn encode(body: &MethodBody<'_>) -> Result<Vec<u8>> {
                 u32::try_from(body.code.len()).map_err(|_| overflow(body.code.len()))?,
             );
             put_u32(&mut out, body.local_var_sig.0);
+            out.extend_from_slice(body.extra_header);
             out.resize(body.header_size, 0);
         }
     }
@@ -69,7 +73,7 @@ pub(crate) fn encode(body: &MethodBody<'_>) -> Result<Vec<u8>> {
             SECTION_MORE_SECTS
         };
         match *section {
-            DataSection::ExceptionClauses { fat, count } => {
+            DataSection::ExceptionClauses { fat, count, .. } => {
                 let clause_size = if fat { FAT_CLAUSE } else { SMALL_CLAUSE };
                 let kind = SECTION_EH_TABLE | more | if fat { SECTION_FAT_FORMAT } else { 0 };
                 section_header(&mut out, kind, fat, 4 + count * clause_size)?;
@@ -98,7 +102,8 @@ fn sections_to_write<'a>(body: &MethodBody<'a>) -> Result<Vec<DataSection<'a>>> 
             !body.clauses.iter().all(fits_small) || 4 + body.clauses.len() * SMALL_CLAUSE > 0xFF;
         return Ok(alloc::vec![DataSection::ExceptionClauses {
             fat,
-            count: body.clauses.len()
+            count: body.clauses.len(),
+            raw: &[],
         }]);
     }
     let counted: usize = body

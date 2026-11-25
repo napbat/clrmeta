@@ -23,14 +23,16 @@ impl<'a> BlobHeap<'a> {
         self.data
     }
 
-    /// Returns the blob at `index`.
+    /// Returns the blob at `index`. Index 0 is the empty blob whatever the
+    /// first byte of the heap holds, as the runtime reads it (`CoreCLR`
+    /// `StgBlobPoolReadOnly::GetBlob`).
     ///
     /// # Errors
     ///
     /// Returns [`Error::HeapIndex`] when the index or the blob is outside the
-    /// heap. Index 0 of an empty heap is the empty blob.
+    /// heap, or the length of the blob is not a valid compressed integer.
     pub fn get(&self, index: BlobIndex) -> Result<&'a [u8]> {
-        if index.0 == 0 && self.data.is_empty() {
+        if index.0 == 0 {
             return Ok(&[]);
         }
         let error = Error::HeapIndex {
@@ -105,5 +107,20 @@ mod tests {
             .map(|(index, blob)| (index.0, blob.len()))
             .collect();
         assert_eq!(entries, [(0, 0), (1, 3), (5, 1)]);
+    }
+
+    #[test]
+    fn index_0_is_the_empty_blob_whatever_the_heap_holds() {
+        // CoreCLR and .NET Framework read an empty public key for blob 0
+        // when the first byte of the heap is 2.
+        let heap = BlobHeap::new(&[0x02, 0xAA, 0xBB, 0x01, 0xCC]);
+        assert_eq!(heap.get(BlobIndex(0)).unwrap(), &[] as &[u8]);
+        assert_eq!(heap.get(BlobIndex(3)).unwrap(), &[0xCC]);
+        // A length of the form 111x is not valid.
+        assert!(
+            BlobHeap::new(&[0, 0xE0, 0, 0, 0])
+                .get(BlobIndex(1))
+                .is_err()
+        );
     }
 }

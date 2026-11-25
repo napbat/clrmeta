@@ -128,9 +128,11 @@ impl BlobHeapBuilder {
             return Ok(BlobIndex(0));
         }
         let data = &self.data;
+        // Index 0 reads as the empty blob whatever the heap holds there.
         let known = self.known.get_or_insert_with(|| {
             BlobHeap::new(data)
                 .iter()
+                .filter(|(index, _)| index.0 != 0)
                 .map(|(index, bytes)| (bytes.to_vec(), index.0))
                 .collect()
         });
@@ -220,18 +222,28 @@ const fn needs_flag(unit: u16) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct GuidHeapBuilder {
     data: Vec<u8>,
+    /// The bytes after a heap whose size is not a multiple of 16, which its
+    /// last GUID ends in.
+    tail: Vec<u8>,
 }
 
 impl GuidHeapBuilder {
-    /// Starts from the bytes of an existing heap.
+    /// Starts from the bytes of an existing heap. A heap whose size is not a
+    /// multiple of 16 keeps the bytes after it that its last GUID ends in
+    /// (see [`GuidHeap::with_bytes_after`]); the writer writes them after
+    /// the heap, outside the size of the stream.
     #[must_use]
     pub fn from_heap(heap: &GuidHeap<'_>) -> Self {
         Self {
             data: heap.data().to_vec(),
+            tail: heap.tail().to_vec(),
         }
     }
 
-    /// Adds a GUID and returns its 1-based index. An equal GUID is reused.
+    /// Adds a GUID and returns its 1-based index. An equal GUID is reused. A
+    /// heap whose size is not a multiple of 16 first gets the bytes after it
+    /// that its last GUID ends in, then zero bytes, so the new GUID starts at
+    /// a GUID boundary and the last GUID keeps its value.
     ///
     /// # Errors
     ///
@@ -241,6 +253,8 @@ impl GuidHeapBuilder {
         if let Some(position) = guids.iter().position(|guid| *guid == value.0) {
             return Ok(GuidIndex(offset_of(position + 1, "#GUID")?));
         }
+        self.data.append(&mut self.tail);
+        self.data.resize(self.data.len().next_multiple_of(16), 0);
         self.data.extend_from_slice(&value.0);
         Ok(GuidIndex(offset_of(self.data.len() / 16, "#GUID")?))
     }
@@ -249,6 +263,11 @@ impl GuidHeapBuilder {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.data
+    }
+
+    /// Returns the bytes after the heap that its last GUID ends in.
+    pub(crate) fn tail(&self) -> &[u8] {
+        &self.tail
     }
 }
 
@@ -289,5 +308,21 @@ mod tests {
         assert_eq!(first, GuidIndex(1));
         assert_eq!(guids.add(Guid([2; 16])).unwrap(), GuidIndex(2));
         assert_eq!(guids.add(Guid([1; 16])).unwrap(), first);
+
+        let mut partial = GuidHeapBuilder::from_heap(&GuidHeap::new(&[7; 8]));
+        assert_eq!(partial.add(Guid([3; 16])).unwrap(), GuidIndex(2));
+        let heap = GuidHeap::new(partial.as_bytes());
+        assert_eq!(heap.get(GuidIndex(2)).unwrap(), Some(Guid([3; 16])));
+
+        // A heap of 8 bytes keeps the 8 bytes after it that its GUID ends
+        // in, and adding a GUID completes the first one with them.
+        let bytes: [u8; 16] = core::array::from_fn(|i| u8::try_from(i).unwrap());
+        let short = GuidHeap::with_bytes_after(&bytes[..8], &bytes[8..]);
+        let mut builder = GuidHeapBuilder::from_heap(&short);
+        assert_eq!(builder.tail(), &bytes[8..]);
+        assert_eq!(builder.add(Guid([3; 16])).unwrap(), GuidIndex(2));
+        assert_eq!(builder.tail(), &[] as &[u8]);
+        let heap = GuidHeap::new(builder.as_bytes());
+        assert_eq!(heap.get(GuidIndex(1)).unwrap(), Some(Guid(bytes)));
     }
 }

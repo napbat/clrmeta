@@ -59,7 +59,7 @@ fn unoptimized_metadata_with_pointer_tables_reads_through_the_pointers() {
     }
     let bytes = builder.write().unwrap();
     let md = Metadata::parse(&bytes).unwrap();
-    assert_eq!(md.tables_stream_name(), "#-");
+    assert_eq!(md.tables_stream_name(), b"#-");
     let fields: alloc::vec::Vec<u32> = md
         .fields_of(Rid::<TypeDefRow>::new(2))
         .unwrap()

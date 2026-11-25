@@ -57,8 +57,17 @@ impl<R> ExactSizeIterator for RowList<'_, R> {}
 
 impl<'a> Metadata<'a> {
     /// Returns the run of rows that the list column `list` of row `row` of
-    /// `owner` owns. A run whose bounds are out of order is empty; the
-    /// validator reports it.
+    /// `owner` owns.
+    ///
+    /// The run ends where the run of the next row starts, or at the end of
+    /// the target table for the last row. The read-write reader of the
+    /// runtime (metadata with a `#-` or a `#Schema` stream) reads a next
+    /// start of 0 as the end of the table (`CoreCLR`
+    /// `CMiniMdRW::Impl_GetEndRidForColumn`). The runtime rejects a run that
+    /// ends before it starts and fails on a row outside the table; this
+    /// reader reads such a run as empty and cuts a run at the end of the
+    /// table, and the validator reports both. A run that starts at row 0 is
+    /// empty.
     fn run<R: TableRow>(
         &self,
         owner: TableId,
@@ -71,14 +80,21 @@ impl<'a> Metadata<'a> {
             .indirection
             .map(|ptr| self.tables().raw_table(ptr))
             .filter(|ptr| !ptr.is_empty());
-        let limit =
-            indirection.map_or_else(|| self.tables().row_count(list.target), |ptr| ptr.len()) + 1;
+        let limit = indirection
+            .map_or_else(|| self.tables().row_count(list.target), |ptr| ptr.len())
+            .saturating_add(1);
+        if start == 0 {
+            return Ok(RowList::empty());
+        }
         let end = if row < owners.len() {
-            owners.raw_in_range(row + 1)[list.column]
+            match owners.raw_in_range(row + 1)[list.column] {
+                0 if self.stream_selection().uncompressed => limit,
+                next => next,
+            }
         } else {
             limit
         };
-        let start = start.clamp(1, limit);
+        let start = start.min(limit);
         Ok(RowList {
             indirection,
             next: start,

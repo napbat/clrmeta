@@ -4,6 +4,8 @@
 //! field signature never resolves as a method, and a `MemberRef` with a
 //! method signature never resolves as a field (ECMA-335 III.4).
 
+use alloc::borrow::Cow;
+
 use clrmeta_model::{FieldSig, LocalSig, MethodSig, MethodSpecSig, TableId, Token, TypeSig};
 
 use crate::body::MethodBody;
@@ -29,8 +31,9 @@ pub struct MethodRef<'a> {
     /// `TypeSpec`, `ModuleRef` or (for a vararg call site) `MethodDef` of a
     /// `MemberRef`.
     pub owner: Token,
-    /// The name.
-    pub name: &'a str,
+    /// The name. A name that is not UTF-8 holds U+FFFD, as reflection
+    /// shows it.
+    pub name: Cow<'a, str>,
     /// The signature.
     pub signature: MethodSig,
     /// The type arguments of a `MethodSpec`.
@@ -44,8 +47,9 @@ pub struct FieldRef<'a> {
     pub token: Token,
     /// The owner: a `TypeDef` for a `Field`; the parent of a `MemberRef`.
     pub owner: Token,
-    /// The name.
-    pub name: &'a str,
+    /// The name. A name that is not UTF-8 holds U+FFFD, as reflection
+    /// shows it.
+    pub name: Cow<'a, str>,
     /// The signature.
     pub signature: FieldSig,
 }
@@ -122,7 +126,7 @@ impl<'m, 'a> Resolver<'m, 'a> {
                     token,
                     definition: token,
                     owner: owner.token(),
-                    name: self.metadata.strings().get(row.name)?,
+                    name: self.metadata.strings().get_lossy(row.name)?,
                     signature: MethodSig::parse(self.blob(row.signature)?)?,
                     instantiation: None,
                 })
@@ -137,7 +141,7 @@ impl<'m, 'a> Resolver<'m, 'a> {
                         token,
                         definition: token,
                         owner: row.class,
-                        name: self.metadata.strings().get(row.name)?,
+                        name: self.metadata.strings().get_lossy(row.name)?,
                         signature,
                         instantiation: None,
                     }),
@@ -184,7 +188,7 @@ impl<'m, 'a> Resolver<'m, 'a> {
                 Ok(FieldRef {
                     token,
                     owner: owner.token(),
-                    name: self.metadata.strings().get(row.name)?,
+                    name: self.metadata.strings().get_lossy(row.name)?,
                     signature: FieldSig::parse(self.blob(row.signature)?)?,
                 })
             }
@@ -197,7 +201,7 @@ impl<'m, 'a> Resolver<'m, 'a> {
                     MemberSignature::Field(signature) => Ok(FieldRef {
                         token,
                         owner: row.class,
-                        name: self.metadata.strings().get(row.name)?,
+                        name: self.metadata.strings().get_lossy(row.name)?,
                         signature,
                     }),
                     MemberSignature::Method(_) => Err(Self::kind_error(

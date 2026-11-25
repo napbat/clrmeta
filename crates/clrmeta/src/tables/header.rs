@@ -61,24 +61,22 @@ impl Default for TablesHeader {
 
 impl TablesHeader {
     /// Parses the header at the start of the tables stream.
+    ///
+    /// A bit of the `valid` mask for a table that the schema does not
+    /// define has a row count too. The runtime reads that count, skips it
+    /// and places no rows (`CoreCLR` `CMiniMdSchema::LoadFrom`); the header
+    /// keeps it.
     pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Self> {
         let reserved = cursor.u32()?;
         let major_version = cursor.u8()?;
         let minor_version = cursor.u8()?;
         let heap_sizes = cursor.u8()?;
         let reserved2 = cursor.u8()?;
-        let valid_offset = cursor.position();
         let valid = cursor.u64()?;
         let sorted = cursor.u64()?;
         let mut row_counts = [0; 64];
         for (bit, count) in row_counts.iter_mut().enumerate() {
             if valid & (1 << bit) != 0 {
-                if TableId::from_u8(u8::try_from(bit).unwrap_or(u8::MAX)).is_none() {
-                    return Err(cursor.malformed_at(
-                        valid_offset,
-                        "the valid mask names a table that the schema does not define",
-                    ));
-                }
                 *count = cursor.u32()?;
             }
         }
@@ -242,6 +240,21 @@ impl Layout {
     }
 }
 
+/// Returns the row counts of the tables that a reader places in the
+/// stream. The runtime knows the tables up to `GenericParamConstraint`
+/// (0x2C): it places no rows for the other tables, the debug tables of a
+/// portable PDB included. A portable PDB (`debug_tables`) has the debug
+/// tables (0x30 to 0x37).
+pub(crate) fn placed_counts(counts: &[u32; 64], debug_tables: bool) -> [u32; 64] {
+    let mut placed = [0; 64];
+    for &table in TableId::ALL {
+        if debug_tables || (table as u8) < TableId::Document as u8 {
+            placed[table as usize] = counts[table as usize];
+        }
+    }
+    placed
+}
+
 fn coded_is_wide(kind: CodedIndexKind, counts: &[u32; 64]) -> bool {
     let limit = kind.small_row_limit();
     kind.tables()
@@ -289,17 +302,27 @@ mod tests {
     }
 
     #[test]
-    fn a_header_that_names_an_undefined_table_is_an_error() {
-        let header = TablesHeader {
-            valid: 1 << 0x2D,
+    fn a_header_keeps_the_row_counts_of_tables_that_the_schema_does_not_define() {
+        // CoreCLR and .NET Framework load a module whose valid mask has the
+        // bits 0x2D, 0x30 and 0x3F; they skip the counts.
+        let mut header = TablesHeader {
+            valid: (1 << 0x2D) | (1 << 0x30) | (1 << 0x3F) | (1 << 2),
             ..TablesHeader::default()
         };
+        header.row_counts[0x2D] = 5;
+        header.row_counts[0x30] = 3;
+        header.row_counts[0x3F] = 1;
+        header.row_counts[2] = 7;
         let mut out = Vec::new();
         header.write(&mut out);
-        assert!(matches!(
-            TablesHeader::parse(&mut Cursor::new(&out, "test")),
-            Err(Error::Malformed { .. })
-        ));
+        let parsed = TablesHeader::parse(&mut Cursor::new(&out, "test")).unwrap();
+        assert_eq!(parsed, header);
+        let placed = placed_counts(&parsed.row_counts, false);
+        assert_eq!(
+            (placed[2], placed[0x2D], placed[0x30], placed[0x3F]),
+            (7, 0, 0, 0)
+        );
+        assert_eq!(placed_counts(&parsed.row_counts, true)[0x30], 3);
     }
 
     #[test]

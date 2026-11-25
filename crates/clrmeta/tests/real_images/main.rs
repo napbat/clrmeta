@@ -6,13 +6,17 @@
 //! runtime under `DOTNET_ROOT` (or `C:/Program Files/dotnet`).
 
 mod checks;
+#[path = "../support/exercise.rs"]
+mod exercise;
+#[path = "../support/pe.rs"]
 mod pe;
 
 use std::path::{Path, PathBuf};
 
-use clrmeta::Metadata;
 use clrmeta::custom_attribute::EnumIndex;
+use clrmeta::{Metadata, MethodDefRow};
 
+use crate::exercise::{Rng, exercise, exercise_body, mutate};
 use crate::pe::PeFile;
 
 /// Returns the directory of the newest `Microsoft.NETCore.App` runtime.
@@ -128,4 +132,45 @@ fn every_assembly_of_the_runtime_reads_and_writes_without_a_problem() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// Mutates the metadata and the method bodies of assemblies of the runtime
+/// and calls every reader API on each mutation. The reader returns errors
+/// and never panics. The mutations are deterministic.
+#[test]
+#[ignore = "real image: mutates assemblies of the installed .NET runtime"]
+fn mutated_assemblies_of_the_runtime_never_panic() {
+    let directory = runtime_directory();
+    let mut rng = Rng::new(0x00C1_A55E_5EED);
+    for name in [
+        "System.Runtime.dll",
+        "System.Collections.dll",
+        "System.Linq.dll",
+        "System.Text.RegularExpressions.dll",
+        "Microsoft.VisualBasic.Core.dll",
+    ] {
+        let pe = load(&directory.join(name)).unwrap_or_else(|| panic!("{name} is not a PE file"));
+        let metadata = pe.metadata().expect("the file has metadata");
+        let read = |rva: u32, len: usize| pe.read(rva, len);
+        for _ in 0..200 {
+            let mutated = mutate(metadata, 4096, &mut rng);
+            exercise(&mutated, read, 300);
+        }
+        let md = Metadata::parse(metadata).unwrap();
+        let mut bodies = 0;
+        for item in md.tables().table::<MethodDefRow>().iter().take(400) {
+            let Ok((rid, row)) = item else { continue };
+            let Ok(Some(parsed)) = md.method_body(rid, read) else {
+                continue;
+            };
+            let Some(body) = pe.read(row.rva, parsed.size) else {
+                continue;
+            };
+            for _ in 0..8 {
+                exercise_body(&mutate(body, 16, &mut rng));
+            }
+            bodies += 1;
+        }
+        println!("{name}: 200 metadata mutations, {bodies} bodies with 8 mutations each");
+    }
 }

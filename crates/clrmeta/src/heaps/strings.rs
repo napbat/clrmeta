@@ -1,5 +1,8 @@
 //! The `#Strings` heap (II.24.2.3): UTF-8 strings that end at a zero byte.
 
+use alloc::borrow::Cow;
+use alloc::string::String;
+
 use crate::error::{Error, HeapKind, Result};
 use crate::heaps::StringIndex;
 
@@ -24,6 +27,10 @@ impl<'a> StringsHeap<'a> {
 
     /// Returns the bytes of the string at `index`, without the zero byte.
     ///
+    /// The runtime cuts the heap after its last zero byte (`CoreCLR`
+    /// `CLiteWeightStgdb::InitOnMem`), so a string in the bytes after the
+    /// last zero byte does not exist.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::HeapIndex`] when the index is outside the heap or no
@@ -47,7 +54,8 @@ impl<'a> StringsHeap<'a> {
     /// # Errors
     ///
     /// Returns an error when the index is outside the heap or the string is
-    /// not UTF-8.
+    /// not UTF-8. [`StringsHeap::get_lossy`] accepts a string that is not
+    /// UTF-8.
     pub fn get(&self, index: StringIndex) -> Result<&'a str> {
         let bytes = self.get_bytes(index)?;
         core::str::from_utf8(bytes).map_err(|_| Error::Malformed {
@@ -55,6 +63,20 @@ impl<'a> StringsHeap<'a> {
             offset: index.0 as usize,
             reason: "the string is not UTF-8",
         })
+    }
+
+    /// Returns the string at `index`, and replaces each sequence of bytes
+    /// that is not UTF-8 with U+FFFD. The runtime does not check the UTF-8
+    /// of names: it compares their bytes, and reflection shows a name that
+    /// is not UTF-8 with replacement characters. The string borrows from the
+    /// heap when it is UTF-8.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::HeapIndex`] when the index is outside the heap or no
+    /// zero byte ends the string.
+    pub fn get_lossy(&self, index: StringIndex) -> Result<Cow<'a, str>> {
+        Ok(String::from_utf8_lossy(self.get_bytes(index)?))
     }
 
     /// Iterates over the strings in heap order, the empty string at offset 0
@@ -128,5 +150,17 @@ mod tests {
         ));
         assert!(heap.get(StringIndex(3)).is_err());
         assert_eq!(StringsHeap::default().get(StringIndex(0)).unwrap(), "");
+    }
+
+    #[test]
+    fn a_name_that_is_not_utf8_reads_with_replacement_characters() {
+        // CoreCLR and .NET Framework load a type named "C\xFFrcle", and
+        // reflection shows "C\u{FFFD}rcle".
+        let heap = StringsHeap::new(b"\0C\xFFrcle\0Circle\0tail");
+        assert_eq!(heap.get_lossy(StringIndex(1)).unwrap(), "C\u{FFFD}rcle");
+        let valid = heap.get_lossy(StringIndex(8)).unwrap();
+        assert!(matches!(valid, Cow::Borrowed("Circle")));
+        // The bytes after the last zero byte are not a string.
+        assert!(heap.get_lossy(StringIndex(15)).is_err());
     }
 }

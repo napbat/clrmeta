@@ -41,8 +41,9 @@ pub struct Column {
 
 /// Conversion between the raw value of a column and the field of a row.
 pub(crate) trait ColumnValue: Sized {
-    /// Converts a raw value. Returns `None` when the value is not valid for
-    /// the column (a coded index with an unused tag).
+    /// Converts a raw value. Returns `None` when the value does not fit the
+    /// field. A coded index always converts: a value that is not valid
+    /// decodes as the runtime decodes it (see [`CodedIndexKind::decode`]).
     fn from_raw(raw: u32, kind: ColumnKind) -> Option<Self>;
 
     /// Converts the field to its raw value. Returns `None` when the column
@@ -113,7 +114,7 @@ impl<R> ColumnValue for Rid<R> {
 impl ColumnValue for Token {
     fn from_raw(raw: u32, kind: ColumnKind) -> Option<Self> {
         match kind {
-            ColumnKind::Coded(coded) => coded.decode(raw),
+            ColumnKind::Coded(coded) => Some(coded.decode(raw)),
             _ => Some(Self(raw)),
         }
     }

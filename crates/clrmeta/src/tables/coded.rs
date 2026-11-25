@@ -140,10 +140,39 @@ impl CodedIndexKind {
         1 << (16 - self.tag_bits())
     }
 
-    /// Decodes a coded index value. Returns `None` for a tag that the kind
-    /// does not use.
+    /// Decodes a coded index value as the runtime does. The runtime decodes
+    /// a coded index only when it reads the row, and a value that is not
+    /// valid does not make it reject the file (`CoreCLR`
+    /// `CMiniMdBase::decodeToken`):
+    ///
+    /// - A tag after the last table of the kind gives the null token of the
+    ///   first table.
+    /// - A tag that ECMA-335 does not use (tags 0, 1 and 4 of
+    ///   `CustomAttributeType`) gives a `Module` token with the row.
+    /// - A row that does not fit the 24 bits of a token gives the null token
+    ///   of the table of the tag. The runtime mixes the high bits of such a
+    ///   row into the token type, which names no useful table.
+    ///
+    /// [`CodedIndexKind::try_decode`] rejects these values, and
+    /// [`Metadata::validate`](crate::Metadata::validate) reports them.
     #[must_use]
-    pub fn decode(self, value: u32) -> Option<Token> {
+    pub fn decode(self, value: u32) -> Token {
+        let bits = self.tag_bits();
+        let tag = (value & ((1 << bits) - 1)) as usize;
+        let tables = self.tables();
+        let Some(&table) = tables.get(tag) else {
+            let first = tables.first().copied().flatten();
+            return Token::new(first.unwrap_or(TableId::Module), 0);
+        };
+        let row = value >> bits;
+        let row = if row <= 0x00FF_FFFF { row } else { 0 };
+        Token::new(table.unwrap_or(TableId::Module), row)
+    }
+
+    /// Decodes a coded index value. Returns `None` for a tag that the kind
+    /// does not use, or a row that does not fit the 24 bits of a token.
+    #[must_use]
+    pub fn try_decode(self, value: u32) -> Option<Token> {
         let bits = self.tag_bits();
         let tag = (value & ((1 << bits) - 1)) as usize;
         let table = self.tables().get(tag).copied().flatten()?;
@@ -153,10 +182,19 @@ impl CodedIndexKind {
 
     /// Encodes a token. Returns `None` when the kind cannot name the table
     /// of the token, or when the row does not fit beside the tag.
+    ///
+    /// A `Module` token of a kind with tags that ECMA-335 does not use
+    /// (`CustomAttributeType`) takes the first such tag, which
+    /// [`CodedIndexKind::decode`] reads back as the same token.
     #[must_use]
     pub fn encode(self, token: Token) -> Option<u32> {
         let table = token.table()?;
-        let tag = self.tables().iter().position(|&t| t == Some(table))?;
+        let tables = self.tables();
+        let tag = tables.iter().position(|&t| t == Some(table)).or_else(|| {
+            (table == TableId::Module)
+                .then(|| tables.iter().position(Option::is_none))
+                .flatten()
+        })?;
         let bits = self.tag_bits();
         let row = token.row();
         (row < (1 << (32 - bits))).then(|| (row << bits) | u32::try_from(tag).unwrap_or(0))
@@ -243,17 +281,38 @@ mod tests {
     #[test]
     fn a_coded_index_decodes_and_encodes_its_table_and_row() {
         let kind = CodedIndexKind::TypeDefOrRef;
-        assert_eq!(kind.decode(20), Some(Token::new(TableId::TypeDef, 5)));
-        assert_eq!(kind.decode(13), Some(Token::new(TableId::TypeRef, 3)));
-        assert_eq!(kind.decode(30), Some(Token::new(TableId::TypeSpec, 7)));
-        assert_eq!(kind.decode(3), None);
+        assert_eq!(kind.decode(20), Token::new(TableId::TypeDef, 5));
+        assert_eq!(kind.decode(13), Token::new(TableId::TypeRef, 3));
+        assert_eq!(kind.decode(30), Token::new(TableId::TypeSpec, 7));
+        assert_eq!(kind.try_decode(30), Some(Token::new(TableId::TypeSpec, 7)));
+        assert_eq!(kind.try_decode(3), None);
         assert_eq!(kind.encode(Token::new(TableId::TypeRef, 3)), Some(13));
         assert_eq!(kind.encode(Token::new(TableId::MethodDef, 3)), None);
         let permission = CodedIndexKind::HasCustomAttribute.decode((4 << 5) | 8);
-        assert_eq!(permission, Some(Token::new(TableId::DeclSecurity, 4)));
+        assert_eq!(permission, Token::new(TableId::DeclSecurity, 4));
         let ctor = CodedIndexKind::CustomAttributeType.decode((9 << 3) | 3);
-        assert_eq!(ctor, Some(Token::new(TableId::MemberRef, 9)));
-        assert_eq!(CodedIndexKind::CustomAttributeType.decode(8), None);
+        assert_eq!(ctor, Token::new(TableId::MemberRef, 9));
+        assert_eq!(CodedIndexKind::CustomAttributeType.try_decode(8), None);
+    }
+
+    #[test]
+    fn a_coded_index_that_is_not_valid_decodes_as_the_runtime_decodes_it() {
+        // A tag after the last table: the null token of the first table.
+        let kind = CodedIndexKind::TypeDefOrRef;
+        assert_eq!(kind.decode((7 << 2) | 3), Token::new(TableId::TypeDef, 0));
+        let declared = CodedIndexKind::HasDeclSecurity.decode(0x7FFF);
+        assert_eq!(declared, Token::new(TableId::TypeDef, 0));
+        // A tag that ECMA-335 does not use: a Module token with the row.
+        let unused = CodedIndexKind::CustomAttributeType;
+        assert_eq!(unused.decode((9 << 3) | 1), Token::new(TableId::Module, 9));
+        assert_eq!(unused.decode(7), Token::new(TableId::Module, 0));
+        let module = Token::new(TableId::Module, 9);
+        assert_eq!(unused.decode(unused.encode(module).unwrap()), module);
+        assert_eq!(kind.encode(module), None);
+        // A row of more than 24 bits: the null token of the table.
+        let wide = CodedIndexKind::MethodDefOrRef.decode(u32::MAX);
+        assert_eq!(wide, Token::new(TableId::MemberRef, 0));
+        assert_eq!(CodedIndexKind::MethodDefOrRef.try_decode(u32::MAX), None);
     }
 
     #[test]

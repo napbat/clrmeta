@@ -36,7 +36,30 @@ methods, parameters, events and properties of their owners and back, nested type
 parameters, custom attributes, constants, layouts and imports, type names
 (`Namespace.Outer/Inner`), and a `Resolver` for the tokens of IL instructions. The resolver
 checks the kind of entity: a `MemberRef` with a field signature never resolves as a method.
-`Metadata::validate` checks every row of every table.
+`Metadata::validate` checks the root, the streams, the header of the tables, the heaps and every
+row of every table, and `MethodBody::validate` checks a method body.
+
+## Runtime compatibility
+
+The reader reads what the .NET runtime reads and ignores what it ignores, so it reads the
+obfuscated and malformed files that the runtime loads. The validator reports what ECMA-335 does
+not allow. Examples:
+
+| File | The runtime and clrmeta |
+| --- | --- |
+| Two heaps of one name | `#~` metadata: the last heap wins. With a `#-` or `#Schema` stream: the first heap wins, names compare without case. |
+| Unknown streams, stream names that are not UTF-8, `#JTD` next to `#~` | Ignored. |
+| A version string of any length or bytes | Read as stored; `version()` replaces bytes that are not UTF-8. |
+| Unknown tables in the `valid` mask, debug tables in a module, extra data (heap size bit 0x40) | The row counts are skipped; no rows. |
+| A coded index with an unused tag | Decodes as CoreCLR `decodeToken` decodes it; the row reads. |
+| Names that are not UTF-8 | `type_name`, the resolver and `StringsHeap::get_lossy` use U+FFFD. |
+| Blob or user string 0, a `#GUID` heap that is not a multiple of 16 | Empty entry; the last GUID reads past the heap. |
+| Method bodies | Fat only when the low 3 bits are 3; `DataSize / 12` (or 24) clauses; clauses from the first section only; clause kinds from the flag bits as the JIT tests them. |
+| A list that goes back, a nesting cycle | An empty list, an error for the name; both reported. |
+
+`crates/clrmeta/tests/obfuscated/fixtures` holds ConfuserEx samples and patched samples for each
+quirk. `build.py` builds them on Windows and runs each one on CoreCLR and .NET Framework to prove
+what the runtime reads (`runs.txt`).
 
 ## Example
 

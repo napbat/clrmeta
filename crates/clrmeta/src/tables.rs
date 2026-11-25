@@ -26,7 +26,7 @@ pub use header::{
 pub use schema::*;
 pub use view::{KeyRows, RawTable, Table, TableIter, Tables};
 
-pub(crate) use header::check_fits;
+pub(crate) use header::{check_fits, placed_counts};
 
 /// A row type of one table.
 pub trait TableRow: Copy + Debug + Sized + 'static {
@@ -167,8 +167,11 @@ mod tests {
         let mut bad = row;
         bad.extends = crate::Token::new(TableId::MethodDef, 1);
         assert_eq!(bad.to_raw(), Err(3));
+        // Tag 0 of CustomAttributeType is not valid: the runtime reads a
+        // Module token, and the row reads.
         let mut ctor = raw;
         ctor[1] = 0;
-        assert_eq!(CustomAttributeRow::from_raw(&ctor), Err(1));
+        let read = CustomAttributeRow::from_raw(&ctor).unwrap();
+        assert_eq!(read.attribute_type, crate::Token::new(TableId::Module, 0));
     }
 }

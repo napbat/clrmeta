@@ -1,10 +1,13 @@
 //! The metadata of a module: the root, the heaps and the tables, with the
 //! lookups that follow the links between the tables.
 
+use alloc::borrow::Cow;
+use alloc::string::String;
+
 use crate::error::{Error, Result};
 use crate::heaps::{BlobHeap, GuidHeap, StringsHeap, UserStringsHeap};
 use crate::pdb::PdbStream;
-use crate::root::MetadataRoot;
+use crate::root::{MetadataRoot, StreamSelection};
 use crate::tables::{AnyRow, TableId, TableRow, Tables};
 use crate::token::Token;
 
@@ -20,11 +23,15 @@ pub use names::TypeName;
 /// The bytes start at the metadata root ("BSJB"): the range that the CLI
 /// header of a PE image names. Every read is checked: a malformed file
 /// returns an error, never a panic.
+///
+/// The reader reads what the runtime reads and ignores what the runtime
+/// ignores, so it reads the files of obfuscators that the runtime loads.
+/// [`Metadata::validate`] reports what ECMA-335 does not allow.
 #[derive(Debug, Clone)]
 pub struct Metadata<'a> {
     data: &'a [u8],
     root: MetadataRoot<'a>,
-    tables_stream: &'a str,
+    selection: StreamSelection,
     tables: Tables<'a>,
     strings: StringsHeap<'a>,
     user_strings: UserStringsHeap<'a>,
@@ -36,10 +43,14 @@ pub struct Metadata<'a> {
 impl<'a> Metadata<'a> {
     /// Parses metadata from the first byte of its root.
     ///
-    /// The heaps are optional: a missing heap reads as empty. The first
-    /// stream of each name counts. A `#Pdb` stream makes the reader size the
-    /// indices into the type system tables from its row counts, and a
-    /// `#JTD` stream makes every index 4 bytes.
+    /// The reader takes the streams that the runtime takes (see
+    /// [`StreamSelection`]): the last stream of a name in metadata with a
+    /// `#~` stream, and the first stream of a name, without case, in
+    /// metadata with a `#-` or a `#Schema` stream. It ignores the other
+    /// streams. A missing heap reads as empty. A `#Pdb` stream makes the
+    /// reader size the indices into the type system tables from its row
+    /// counts, and a `#JTD` stream in metadata with a `#-` or a `#Schema`
+    /// stream makes every index 4 bytes.
     ///
     /// # Errors
     ///
@@ -47,30 +58,30 @@ impl<'a> Metadata<'a> {
     /// missing or not valid, or a stream lies outside `data`.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let root = MetadataRoot::parse(data)?;
-        let stream = |name: &str| {
-            root.stream(name).map(|header| {
-                let start = header.offset as usize;
-                &data[start..start + header.size as usize]
-            })
-        };
-        let (tables_stream, tables_data) = ["#~", "#-"]
-            .into_iter()
-            .find_map(|name| stream(name).map(|bytes| (name, bytes)))
-            .ok_or(Error::MissingStream("#~"))?;
-        let pdb = stream("#Pdb").map(PdbStream::parse).transpose()?;
+        let selection = root.selection();
+        let stream = |index: Option<usize>| index.map(|index| root.stream_data(data, index));
+        let tables_data = stream(selection.tables).ok_or(Error::MissingStream("#~"))?;
+        let pdb = stream(selection.pdb).map(PdbStream::parse).transpose()?;
         let tables = Tables::parse_with(
             tables_data,
             pdb.as_ref().map(|pdb| &pdb.type_system_table_rows),
-            root.stream("#JTD").is_some(),
+            selection.jtd.is_some(),
         )?;
+        let guids = selection.guids.map_or_else(GuidHeap::default, |index| {
+            let end = root.streams.get(index).map_or(data.len(), |header| {
+                header.offset as usize + header.size as usize
+            });
+            let after = data.get(end..).unwrap_or_default();
+            GuidHeap::with_bytes_after(root.stream_data(data, index), after)
+        });
         Ok(Self {
             data,
-            tables_stream,
+            selection,
             tables,
-            strings: StringsHeap::new(stream("#Strings").unwrap_or_default()),
-            user_strings: UserStringsHeap::new(stream("#US").unwrap_or_default()),
-            guids: GuidHeap::new(stream("#GUID").unwrap_or_default()),
-            blobs: BlobHeap::new(stream("#Blob").unwrap_or_default()),
+            strings: StringsHeap::new(stream(selection.strings).unwrap_or_default()),
+            user_strings: UserStringsHeap::new(stream(selection.user_strings).unwrap_or_default()),
+            guids,
+            blobs: BlobHeap::new(stream(selection.blobs).unwrap_or_default()),
             pdb,
             root,
         })
@@ -88,17 +99,28 @@ impl<'a> Metadata<'a> {
         &self.root
     }
 
-    /// Returns the version string of the runtime.
+    /// Returns the streams that the reader takes, by their position in the
+    /// stream headers of the root.
     #[must_use]
-    pub const fn version(&self) -> &'a str {
-        self.root.version
+    pub const fn stream_selection(&self) -> &StreamSelection {
+        &self.selection
     }
 
-    /// Returns the name of the tables stream: `#~`, or `#-` for unoptimized
-    /// metadata.
+    /// Returns the version string of the runtime. A byte sequence that is
+    /// not UTF-8 becomes U+FFFD; the runtime does not check it.
     #[must_use]
-    pub const fn tables_stream_name(&self) -> &'a str {
-        self.tables_stream
+    pub fn version(&self) -> Cow<'a, str> {
+        String::from_utf8_lossy(self.root.version_string())
+    }
+
+    /// Returns the name of the tables stream as the stream header holds it:
+    /// `#~`, or `#-` for unoptimized metadata.
+    #[must_use]
+    pub fn tables_stream_name(&self) -> &'a [u8] {
+        self.selection
+            .tables
+            .and_then(|index| self.root.streams.get(index))
+            .map_or(&[], |header| header.name)
     }
 
     /// Returns the tables.

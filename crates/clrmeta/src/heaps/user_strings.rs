@@ -23,8 +23,8 @@ impl<'a> UserString<'a> {
     }
 
     /// Returns the final byte: 1 when a character needs more than an 8-bit
-    /// handling (II.24.2.4), else 0. An empty string has no final byte and
-    /// returns 0.
+    /// handling (II.24.2.4), else 0. An empty string, or an entry of an even
+    /// length that has no final byte, returns 0.
     #[must_use]
     pub const fn flag(&self) -> u8 {
         self.flag
@@ -91,18 +91,21 @@ impl<'a> UserStringsHeap<'a> {
         self.data
     }
 
-    /// Returns the string at an offset.
+    /// Returns the string at an offset, as the runtime reads it (`CoreCLR`
+    /// `MDInternalRO::GetUserString`): offset 0 is the empty string whatever
+    /// the first byte of the heap holds, and an entry of an even length has
+    /// no final byte, so every byte is part of the UTF-16 code units.
     ///
     /// # Errors
     ///
     /// Returns [`Error::HeapIndex`] when the offset or the string is outside
-    /// the heap, or the length is even and not zero (no final byte).
+    /// the heap, or the length is not a valid compressed integer.
     pub fn get(&self, offset: u32) -> Result<UserString<'a>> {
         let error = Error::HeapIndex {
             heap: HeapKind::UserStrings,
             index: offset,
         };
-        if offset == 0 && self.data.is_empty() {
+        if offset == 0 {
             return Ok(UserString {
                 utf16: &[],
                 flag: 0,
@@ -143,14 +146,13 @@ impl<'a> UserStringsHeap<'a> {
 fn read_entry<'a>(cursor: &mut Cursor<'a>) -> Option<UserString<'a>> {
     let len = cursor.compressed_u32().ok()? as usize;
     let bytes = cursor.bytes(len).ok()?;
-    match bytes.split_last() {
-        None => Some(UserString {
-            utf16: &[],
+    Some(match bytes.split_last() {
+        Some((&flag, utf16)) if len % 2 == 1 => UserString { utf16, flag },
+        _ => UserString {
+            utf16: bytes,
             flag: 0,
-        }),
-        Some((&flag, utf16)) if utf16.len() % 2 == 0 => Some(UserString { utf16, flag }),
-        Some(_) => None,
-    }
+        },
+    })
 }
 
 impl<'a> IntoIterator for &UserStringsHeap<'a> {
@@ -207,8 +209,15 @@ mod tests {
     }
 
     #[test]
-    fn an_even_length_without_a_final_byte_is_an_error() {
-        let heap = UserStringsHeap::new(&[0x00, 0x02, b'a', 0]);
-        assert!(heap.get(1).is_err());
+    fn an_even_length_is_read_as_code_units_without_a_final_byte() {
+        // The runtime takes size / 2 characters and does not require the
+        // final byte.
+        let heap = UserStringsHeap::new(&[0x07, 0x02, b'a', 0]);
+        let even = heap.get(1).unwrap();
+        assert_eq!(even.to_string().unwrap(), "a");
+        assert_eq!(even.flag(), 0);
+        // Offset 0 is the empty string whatever the heap holds.
+        assert!(heap.get(0).unwrap().is_empty());
+        assert!(UserStringsHeap::new(&[0, 0xFF]).get(1).is_err());
     }
 }

@@ -1,7 +1,6 @@
 //! The writer of metadata: owned rows and heaps to the bytes of a metadata
 //! root with its streams.
 
-use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::bytes::{pad4, put_index};
@@ -9,10 +8,10 @@ use crate::error::{Error, Result};
 use crate::heaps::{BlobHeapBuilder, GuidHeapBuilder, StringsHeapBuilder, UserStringsHeapBuilder};
 use crate::metadata::Metadata;
 use crate::pdb::PdbStream;
-use crate::root::{MetadataRoot, StreamHeader};
+use crate::root::{MetadataRoot, StreamHeader, StreamSelection};
 use crate::tables::{
     HEAP_BLOB_WIDE, HEAP_GUID_WIDE, HEAP_STRINGS_WIDE, Layout, TableId, TableRows, TablesHeader,
-    columns,
+    columns, placed_counts,
 };
 
 /// The `sorted` mask that the reference compilers write: every table that
@@ -35,7 +34,9 @@ pub enum StreamSlot {
     /// The `#Pdb` stream.
     Pdb,
     /// A stream that the builder keeps as bytes: its name and its data.
-    Raw(String, Vec<u8>),
+    /// [`MetadataBuilder::from_metadata`] keeps each stream that the reader
+    /// does not take this way, the extra heaps of an obfuscator included.
+    Raw(Vec<u8>, Vec<u8>),
 }
 
 /// Owned metadata that writes to bytes.
@@ -52,8 +53,9 @@ pub struct MetadataBuilder {
     pub minor_version: u16,
     /// The reserved field of the root.
     pub reserved: u32,
-    /// The version string of the runtime.
-    pub version: String,
+    /// The version field of the root: the version string of the runtime, a
+    /// zero byte and padding. The writer writes the bytes as they are.
+    pub version: Vec<u8>,
     /// The flags of the root.
     pub flags: u16,
     /// The template of the tables header: its reserved fields, versions,
@@ -85,14 +87,17 @@ pub struct MetadataBuilder {
 }
 
 impl MetadataBuilder {
-    /// Makes empty metadata with a runtime version string.
+    /// Makes empty metadata with a runtime version string. The version
+    /// field gets a zero byte and padding to a multiple of 4.
     #[must_use]
     pub fn new(version: &str) -> Self {
+        let mut field = version.as_bytes().to_vec();
+        field.resize((field.len() + 1).next_multiple_of(4), 0);
         Self {
             major_version: 1,
             minor_version: 1,
             reserved: 0,
-            version: version.to_string(),
+            version: field,
             flags: 0,
             tables_header: TablesHeader {
                 sorted: DEFAULT_SORTED,
@@ -118,44 +123,51 @@ impl MetadataBuilder {
 
     /// Copies parsed metadata.
     ///
+    /// The streams that the reader takes (see
+    /// [`StreamSelection`](crate::root::StreamSelection)) become the
+    /// slots of the tables and the heaps. Every other stream stays a
+    /// [`StreamSlot::Raw`] stream at its position. A slot writes the
+    /// standard name, so a heap that the read-write reader takes by a name
+    /// in another case (`#STRINGS`) gets the standard name.
+    ///
     /// # Errors
     ///
     /// Returns an error when a row is not valid.
     pub fn from_metadata(metadata: &Metadata<'_>) -> Result<Self> {
         let root = metadata.root();
-        let mut streams = Vec::with_capacity(root.streams.len());
-        let mut seen = Vec::new();
-        for header in &root.streams {
-            let slot = match header.name {
-                "#~" | "#-" => StreamSlot::Tables,
-                "#Strings" => StreamSlot::Strings,
-                "#US" => StreamSlot::UserStrings,
-                "#GUID" => StreamSlot::Guid,
-                "#Blob" => StreamSlot::Blob,
-                "#Pdb" => StreamSlot::Pdb,
-                _ => StreamSlot::Raw(String::new(), Vec::new()),
-            };
-            let slot = if matches!(slot, StreamSlot::Raw(..)) || seen.contains(&slot) {
-                let start = header.offset as usize;
-                let data = metadata
-                    .data()
-                    .get(start..start + header.size as usize)
-                    .unwrap_or_default();
-                StreamSlot::Raw(header.name.to_string(), data.to_vec())
-            } else {
-                seen.push(slot.clone());
-                slot
-            };
-            streams.push(slot);
-        }
+        let selection = metadata.stream_selection();
+        let slots = [
+            (selection.tables, StreamSlot::Tables),
+            (selection.strings, StreamSlot::Strings),
+            (selection.user_strings, StreamSlot::UserStrings),
+            (selection.guids, StreamSlot::Guid),
+            (selection.blobs, StreamSlot::Blob),
+            (selection.pdb, StreamSlot::Pdb),
+        ];
+        let streams = (0..root.streams.len())
+            .map(|index| {
+                slots
+                    .iter()
+                    .find(|(selected, _)| *selected == Some(index))
+                    .map_or_else(
+                        || {
+                            StreamSlot::Raw(
+                                root.streams[index].name.to_vec(),
+                                root.stream_data(metadata.data(), index).to_vec(),
+                            )
+                        },
+                        |(_, slot)| slot.clone(),
+                    )
+            })
+            .collect();
         Ok(Self {
             major_version: root.major_version,
             minor_version: root.minor_version,
             reserved: root.reserved,
-            version: root.version.to_string(),
+            version: root.version.to_vec(),
             flags: root.flags,
             tables_header: metadata.tables().header().clone(),
-            uncompressed: metadata.tables_stream_name() == "#-",
+            uncompressed: metadata.tables_stream_name().eq_ignore_ascii_case(b"#-"),
             tables_trailer: metadata
                 .tables()
                 .data()
@@ -172,6 +184,20 @@ impl MetadataBuilder {
         })
     }
 
+    /// Returns the name of each stream in output order.
+    fn stream_names(&self) -> impl Iterator<Item = &[u8]> {
+        let tables_name: &[u8] = if self.uncompressed { b"#-" } else { b"#~" };
+        self.streams.iter().map(move |slot| match slot {
+            StreamSlot::Tables => tables_name,
+            StreamSlot::Strings => b"#Strings",
+            StreamSlot::UserStrings => b"#US",
+            StreamSlot::Guid => b"#GUID",
+            StreamSlot::Blob => b"#Blob",
+            StreamSlot::Pdb => b"#Pdb",
+            StreamSlot::Raw(name, _) => name.as_slice(),
+        })
+    }
+
     /// Writes the metadata.
     ///
     /// # Errors
@@ -179,21 +205,25 @@ impl MetadataBuilder {
     /// Returns an error when a row holds a value that its column cannot
     /// hold, or a stream is larger than 4 GiB.
     pub fn write(&self) -> Result<Vec<u8>> {
-        let tables = self.write_tables()?;
+        let names: Vec<&[u8]> = self.stream_names().collect();
+        let wide = StreamSelection::of(&names).jtd.is_some();
+        let tables = self.write_tables(wide)?;
         let pdb = self.pdb.as_ref().map(PdbStream::write);
-        let tables_name = if self.uncompressed { "#-" } else { "#~" };
-        let mut parts: Vec<(&str, &[u8])> = Vec::with_capacity(self.streams.len());
-        for slot in &self.streams {
-            let part: (&str, &[u8]) = match slot {
-                StreamSlot::Tables => (tables_name, &tables),
-                StreamSlot::Strings => ("#Strings", self.strings.as_bytes()),
-                StreamSlot::UserStrings => ("#US", self.user_strings.as_bytes()),
-                StreamSlot::Guid => ("#GUID", self.guids.as_bytes()),
-                StreamSlot::Blob => ("#Blob", self.blobs.as_bytes()),
-                StreamSlot::Pdb => ("#Pdb", pdb.as_deref().unwrap_or_default()),
-                StreamSlot::Raw(name, data) => (name.as_str(), data),
+        // Each part: the name, the bytes of the stream, and the bytes after
+        // it that its header does not count (the end of the last GUID of a
+        // #GUID heap whose size is not a multiple of 16).
+        let mut parts: Vec<(&[u8], &[u8], &[u8])> = Vec::with_capacity(self.streams.len());
+        for (slot, name) in self.streams.iter().zip(self.stream_names()) {
+            let (data, tail): (&[u8], &[u8]) = match slot {
+                StreamSlot::Tables => (&tables, &[]),
+                StreamSlot::Strings => (self.strings.as_bytes(), &[]),
+                StreamSlot::UserStrings => (self.user_strings.as_bytes(), &[]),
+                StreamSlot::Guid => (self.guids.as_bytes(), self.guids.tail()),
+                StreamSlot::Blob => (self.blobs.as_bytes(), &[]),
+                StreamSlot::Pdb => (pdb.as_deref().unwrap_or_default(), &[]),
+                StreamSlot::Raw(_, data) => (data, &[]),
             };
-            parts.push(part);
+            parts.push((name, data, tail));
         }
         let root = MetadataRoot {
             major_version: self.major_version,
@@ -203,34 +233,54 @@ impl MetadataBuilder {
             flags: self.flags,
             streams: Vec::new(),
         };
-        let mut offset = MetadataRoot::header_size(&self.version, parts.iter().map(|p| p.0.len()));
+        // A version field whose length is not a multiple of 4 leaves the
+        // header unaligned; the streams still start at multiples of 4.
+        let header_size =
+            MetadataRoot::header_size(self.version.len(), parts.iter().map(|p| p.0.len()));
+        let mut offset = header_size.next_multiple_of(4);
         let mut headers = Vec::with_capacity(parts.len());
-        for &(name, data) in &parts {
-            let size = data.len().next_multiple_of(4);
+        for &(name, data, tail) in &parts {
+            // A stream with bytes after it keeps its exact size.
+            let size = if tail.is_empty() {
+                data.len().next_multiple_of(4)
+            } else {
+                data.len()
+            };
             headers.push(StreamHeader {
                 offset: to_u32(offset)?,
                 size: to_u32(size)?,
                 name,
             });
-            offset += size;
+            offset += (data.len() + tail.len()).next_multiple_of(4);
         }
         let mut out = Vec::with_capacity(offset);
         MetadataRoot::write_header(&mut out, &root, &headers)?;
-        for (_, data) in parts {
-            out.extend_from_slice(data);
+        for (_, data, tail) in parts {
             pad4(&mut out);
+            out.extend_from_slice(data);
+            out.extend_from_slice(tail);
         }
+        pad4(&mut out);
         Ok(out)
     }
 
-    /// Writes the tables stream.
-    fn write_tables(&self) -> Result<Vec<u8>> {
+    /// Writes the tables stream. `wide` makes every index 4 bytes.
+    ///
+    /// Without a `#Pdb` stream, the reader places no rows for the debug
+    /// tables, so the writer writes none and keeps the row counts of the
+    /// template header for them, as it keeps the counts of the tables that
+    /// the schema does not define.
+    fn write_tables(&self, wide: bool) -> Result<Vec<u8>> {
         let mut header = self.tables_header.clone();
         let wide_heap = |len: usize, flag: u8| if len > 0xFFFF { flag } else { 0 };
         header.heap_sizes |= wide_heap(self.strings.as_bytes().len(), HEAP_STRINGS_WIDE)
             | wide_heap(self.guids.as_bytes().len() / 16, HEAP_GUID_WIDE)
             | wide_heap(self.blobs.as_bytes().len(), HEAP_BLOB_WIDE);
+        let debug_tables = self.pdb.is_some();
         for &table in TableId::ALL {
+            if !debug_tables && table as u8 >= TableId::Document as u8 {
+                continue;
+            }
             let count = to_u32(self.rows.row_count(table))?;
             let bit = 1u64 << table as u8;
             if count > 0 {
@@ -240,26 +290,17 @@ impl MetadataBuilder {
         }
         let mut out = Vec::new();
         header.write(&mut out);
-        let mut sizing = header.row_counts;
+        let row_counts = placed_counts(&header.row_counts, debug_tables);
+        let mut sizing = row_counts;
         if let Some(pdb) = &self.pdb {
             for (count, &external) in sizing.iter_mut().zip(&pdb.type_system_table_rows) {
                 *count = (*count).max(external);
             }
         }
-        let wide = self
-            .streams
-            .iter()
-            .any(|slot| matches!(slot, StreamSlot::Raw(name, _) if name == "#JTD"));
-        let layout = Layout::compute(
-            header.heap_sizes,
-            &header.row_counts,
-            &sizing,
-            wide,
-            out.len(),
-        );
+        let layout = Layout::compute(header.heap_sizes, &row_counts, &sizing, wide, out.len());
         for &table in TableId::ALL {
-            let widths = layout.table(table).widths;
-            for position in 0..self.rows.row_count(table) {
+            let placed = layout.table(table);
+            for position in 0..placed.row_count as usize {
                 let row = self.rows.any_row(table, position).ok_or(Error::Overflow {
                     structure: "tables stream",
                     value: position as u64,
@@ -274,7 +315,7 @@ impl MetadataBuilder {
                 let raw = row.to_raw().map_err(|column| {
                     column_error(column, "the coded index cannot name the table")
                 })?;
-                for (column, (&value, &width)) in raw.iter().zip(&widths).enumerate() {
+                for (column, (&value, &width)) in raw.iter().zip(&placed.widths).enumerate() {
                     if width == 0 {
                         break;
                     }

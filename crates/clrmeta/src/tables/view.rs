@@ -6,7 +6,7 @@ use crate::bytes::Cursor;
 use crate::error::{Error, Result};
 use crate::tables::{
     AnyRow, Layout, MAX_COLUMNS, RawRow, TableId, TableLayout, TableRow, TableRows, TablesHeader,
-    check_fits, columns, sort_key,
+    check_fits, columns, placed_counts, sort_key,
 };
 use crate::token::{Rid, Token};
 
@@ -20,7 +20,8 @@ pub struct Tables<'a> {
 }
 
 impl<'a> Tables<'a> {
-    /// Parses a tables stream.
+    /// Parses the tables stream of a module. The debug tables of a portable
+    /// PDB have no rows; see [`Tables::parse_with`].
     ///
     /// # Errors
     ///
@@ -35,8 +36,13 @@ impl<'a> Tables<'a> {
     ///
     /// `type_system_rows` are the row counts of the tables of the type
     /// system that a portable PDB refers to (the `#Pdb` stream); they set
-    /// the widths of the indices into those tables. `wide` makes every index
-    /// 4 bytes, as the `#JTD` stream of a minimal delta requires.
+    /// the widths of the indices into those tables, and they mark the stream
+    /// as the stream of a portable PDB. Only a portable PDB has rows in the
+    /// debug tables: in a module, the runtime places no rows for a table
+    /// after `GenericParamConstraint`, and [`Tables::row_count`] is zero for
+    /// it. [`TablesHeader::row_counts`] keeps the counts of the header.
+    /// `wide` makes every index 4 bytes, as the `#JTD` stream of a minimal
+    /// delta requires.
     ///
     /// # Errors
     ///
@@ -49,7 +55,8 @@ impl<'a> Tables<'a> {
     ) -> Result<Self> {
         let mut cursor = Cursor::new(data, "tables stream");
         let header = TablesHeader::parse(&mut cursor)?;
-        let mut sizing = header.row_counts;
+        let row_counts = placed_counts(&header.row_counts, type_system_rows.is_some());
+        let mut sizing = row_counts;
         if let Some(external) = type_system_rows {
             for (count, &extern_count) in sizing.iter_mut().zip(external) {
                 *count = (*count).max(extern_count);
@@ -57,7 +64,7 @@ impl<'a> Tables<'a> {
         }
         let layout = Layout::compute(
             header.heap_sizes,
-            &header.row_counts,
+            &row_counts,
             &sizing,
             wide,
             cursor.position(),
@@ -95,10 +102,12 @@ impl<'a> Tables<'a> {
         self.data
     }
 
-    /// Returns the row count of a table.
+    /// Returns the number of rows that the stream holds for a table: the
+    /// count of the header, or zero for a table that the reader does not
+    /// place (see [`Tables::parse_with`]).
     #[must_use]
     pub const fn row_count(&self, table: TableId) -> u32 {
-        self.header.row_count(table)
+        self.layout.table(table).row_count
     }
 
     /// Returns the typed view of the table of `R`.

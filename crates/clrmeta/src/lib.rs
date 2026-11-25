@@ -10,7 +10,14 @@
 //!
 //! The reader borrows from the input. Every read is checked; a malformed
 //! file returns an [`Error`] that names the structure, the row or the
-//! offset. [`MetadataBuilder`] writes metadata back.
+//! offset, never a panic. [`MetadataBuilder`] writes metadata back.
+//!
+//! The reader reads what the .NET runtime reads and ignores what it
+//! ignores, so it reads the files of obfuscators that the runtime loads:
+//! duplicate and unknown streams, names that are not UTF-8, unknown tables
+//! in the header, coded indices that are not valid in rows that nothing
+//! reads, and method bodies with unusual sections. [`Metadata::validate`]
+//! and [`MethodBody::validate`] report what ECMA-335 does not allow.
 //!
 //! ```
 //! use clrmeta::{Metadata, MetadataBuilder, TypeDefRow};
@@ -72,5 +79,5 @@ pub use resolve::{FieldRef, Member, MethodRef, Resolver, TypeRef};
 pub use signature::Signature;
 pub use tables::*;
 pub use token::{Rid, Token, USER_STRING_TOKEN_TYPE};
-pub use validate::Issue;
+pub use validate::{Issue, Location};
 pub use write::{DEFAULT_SORTED, MetadataBuilder, StreamSlot};

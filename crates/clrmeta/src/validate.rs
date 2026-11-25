@@ -1,10 +1,14 @@
-//! The validation of the links between the tables and the heaps.
+//! The validation of the metadata against ECMA-335: the root, the streams,
+//! the header of the tables, the heaps, and the links between the tables.
+//!
+//! The reader accepts what the runtime accepts; the validator reports what
+//! ECMA-335 does not allow, and names what the runtime rejects.
 
 use alloc::vec::Vec;
 
 use clrmeta_model::element_type as et;
 
-use crate::error::Error;
+use crate::error::{Error, HeapKind};
 use crate::heaps::{BlobIndex, GuidIndex, StringIndex};
 use crate::marshal::MarshalDescriptor;
 use crate::metadata::Metadata;
@@ -14,28 +18,59 @@ use crate::signature::{
 };
 use crate::tables::{ColumnKind, RawRow, TableId, columns, list_columns, sort_key};
 
-/// A problem that [`Metadata::validate`] finds in a column of a row.
+mod structure;
+
+/// The place of a problem that [`Metadata::validate`] finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Location {
+    /// The metadata root (II.24.2.1).
+    Root,
+    /// A stream header, by its position in the root (II.24.2.2).
+    Stream(usize),
+    /// The header of the tables stream (II.24.2.6).
+    TablesHeader,
+    /// A heap (II.24.2.3 to II.24.2.5).
+    Heap(HeapKind),
+    /// A column of a row of a table.
+    Column {
+        /// The table.
+        table: TableId,
+        /// The 1-based row.
+        row: u32,
+        /// The name of the column.
+        column: &'static str,
+    },
+}
+
+/// A problem that [`Metadata::validate`] finds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue {
-    /// The table.
-    pub table: TableId,
-    /// The 1-based row.
-    pub row: u32,
-    /// The name of the column.
-    pub column: &'static str,
+    /// Where the problem is.
+    pub location: Location,
     /// The problem.
     pub error: Error,
 }
 
 impl Metadata<'_> {
-    /// Checks every row of every table: the coded index tags, the indices
-    /// into the tables and the heaps, the UTF-8 of the names, the
-    /// signatures, the marshalling descriptors, the sizes of the constants,
-    /// the order of the list columns, and the order of the tables that
-    /// ECMA-335 requires to be sorted. Returns the problems in table order.
+    /// Checks the metadata against ECMA-335 and returns the problems: first
+    /// the root, the streams, the header of the tables and the heaps, then
+    /// every row of every table in table order.
+    ///
+    /// The checks of the structure report what the reader accepts and
+    /// ECMA-335 does not allow: duplicate and unknown streams, the streams
+    /// that the runtime does not read, the version fields, unknown heap size
+    /// bits and tables, index widths that cannot reach the end of a heap,
+    /// and heaps that do not start with their empty entry.
+    ///
+    /// The checks of the rows cover the coded index tags, the indices into
+    /// the tables and the heaps, the UTF-8 of the names, the signatures, the
+    /// marshalling descriptors, the sizes of the constants, the order of the
+    /// list columns, the order of the tables that ECMA-335 requires to be
+    /// sorted, the order of nested types, and the tables that hold one row.
     #[must_use]
     pub fn validate(&self) -> Vec<Issue> {
         let mut issues = Vec::new();
+        self.validate_structure(&mut issues);
         for &table in TableId::ALL {
             let view = self.tables().raw_table(table);
             let mut previous: Option<RawRow> = None;
@@ -43,9 +78,11 @@ impl Metadata<'_> {
                 let raw = view.raw_in_range(row);
                 let mut report = |column: usize, error: Error| {
                     issues.push(Issue {
-                        table,
-                        row,
-                        column: columns(table).get(column).map_or("?", |c| c.name),
+                        location: Location::Column {
+                            table,
+                            row,
+                            column: columns(table).get(column).map_or("?", |c| c.name),
+                        },
                         error,
                     });
                 };
@@ -61,6 +98,17 @@ impl Metadata<'_> {
                 }
                 if let Some(previous) = previous {
                     order_issues(table, row, &previous, &raw, &mut report);
+                }
+                if let Some((column, reason)) = self.row_issue(table, row, &raw) {
+                    report(
+                        column,
+                        Error::Column {
+                            table,
+                            row,
+                            column: columns(table)[column].name,
+                            reason,
+                        },
+                    );
                 }
                 previous = Some(raw);
             }
@@ -106,7 +154,7 @@ impl Metadata<'_> {
                 }
             }
             ColumnKind::Coded(coded) => {
-                let token = coded.decode(value).ok_or_else(|| {
+                let token = coded.try_decode(value).ok_or_else(|| {
                     reject("the coded index has a tag that the column does not use")
                 })?;
                 let target = token
@@ -193,7 +241,8 @@ fn check_constant(element: u8, value: &[u8]) -> Result<(), Error> {
 }
 
 /// Checks the order of a row against the row before it: list columns do
-/// not decrease, and a table that ECMA-335 requires to be sorted is sorted.
+/// not decrease, a table that ECMA-335 requires to be sorted is sorted, and
+/// a nested type has one enclosing type.
 fn order_issues(
     table: TableId,
     row: u32,
@@ -201,30 +250,71 @@ fn order_issues(
     raw: &RawRow,
     report: &mut impl FnMut(usize, Error),
 ) {
+    let mut flag = |column: usize, reason| {
+        report(
+            column,
+            Error::Column {
+                table,
+                row,
+                column: columns(table)[column].name,
+                reason,
+            },
+        );
+    };
     for list in list_columns(table) {
         if raw[list.column] < previous[list.column] {
-            report(
+            flag(
                 list.column,
-                Error::Column {
-                    table,
-                    row,
-                    column: columns(table)[list.column].name,
-                    reason: "the list starts before the list of the row before",
-                },
+                "the list starts before the list of the row before",
             );
         }
     }
     if let Some(key) = sort_key(table)
         && raw[key] < previous[key]
     {
-        report(
-            key,
-            Error::Column {
-                table,
-                row,
-                column: columns(table)[key].name,
-                reason: "the table is not sorted by this column",
-            },
+        flag(key, "the table is not sorted by this column");
+    }
+    if table == TableId::NestedClass && raw[0] == previous[0] {
+        flag(
+            0,
+            "the type has another enclosing type; the runtime finds one of them",
         );
+    }
+}
+
+impl Metadata<'_> {
+    /// Returns the problem of a row on its own, with the position of its
+    /// column.
+    fn row_issue(&self, table: TableId, row: u32, raw: &RawRow) -> Option<(usize, &'static str)> {
+        match table {
+            // ConfuserEx adds a second Module and a second Assembly row; the
+            // runtime reads the first.
+            TableId::Module | TableId::Assembly if row > 1 => Some((
+                0,
+                "ECMA-335 allows one row in this table; the runtime reads the first",
+            )),
+            // The class loader of CoreCLR adds the types to its table of
+            // names in row order (`PopulateAvailableClassHashTable`). It
+            // rejects a nested type whose enclosing type comes after it,
+            // which also rejects a cycle. It leaves out a type nested in
+            // `<Module>`, so it rejects a type nested in such a type, as
+            // ConfuserEx makes them. .NET Framework loads these modules.
+            TableId::NestedClass if raw[1] >= raw[0] => Some((
+                1,
+                "the enclosing type does not come before the nested type; CoreCLR rejects the module",
+            )),
+            TableId::NestedClass
+                if raw[1] != 1
+                    && self
+                        .enclosing_type(crate::Rid::new(raw[1]))
+                        .is_ok_and(|outer| outer.is_some_and(|outer| outer.row() == 1)) =>
+            {
+                Some((
+                    1,
+                    "the enclosing type is nested in <Module>; CoreCLR rejects the module",
+                ))
+            }
+            _ => None,
+        }
     }
 }

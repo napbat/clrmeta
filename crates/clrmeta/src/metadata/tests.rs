@@ -10,6 +10,9 @@ use crate::resolve::{Member, TypeRef};
 use crate::tables::{AnyRow, MethodDefRow, TypeDefRow};
 use crate::test_support::{HELLO, sample};
 use crate::token::Rid;
+use crate::validate::Location;
+
+mod quirks;
 
 fn rows<R>(list: impl Iterator<Item = Rid<R>>) -> Vec<u32> {
     list.map(Rid::row).collect()
@@ -20,7 +23,7 @@ fn the_lists_and_their_owners_agree() {
     let bytes = sample().write().unwrap();
     let md = Metadata::parse(&bytes).unwrap();
     assert_eq!(md.version(), "v4.0.30319");
-    assert_eq!(md.tables_stream_name(), "#~");
+    assert_eq!(md.tables_stream_name(), b"#~");
     let outer = Rid::<TypeDefRow>::new(2);
     let inner = Rid::<TypeDefRow>::new(3);
     assert_eq!(rows(md.methods_of(Rid::new(1)).unwrap()), [] as [u32; 0]);
@@ -164,14 +167,11 @@ fn a_valid_module_has_no_issues_and_a_broken_one_has_named_issues() {
     broken.rows.field[0].signature = broken.rows.member_ref[0].signature;
     let bytes = broken.write().unwrap();
     let md = Metadata::parse(&bytes).unwrap();
-    let issues: Vec<_> = md
-        .validate()
-        .into_iter()
-        .map(|i| (i.table, i.row, i.column))
-        .collect();
-    assert!(issues.contains(&(TableId::TypeDef, 2, "method_list")));
-    assert!(issues.contains(&(TableId::TypeDef, 3, "method_list")));
-    assert!(issues.contains(&(TableId::Field, 1, "signature")));
+    let issues: Vec<_> = md.validate().into_iter().map(|i| i.location).collect();
+    let column = |table, row, column| Location::Column { table, row, column };
+    assert!(issues.contains(&column(TableId::TypeDef, 2, "method_list")));
+    assert!(issues.contains(&column(TableId::TypeDef, 3, "method_list")));
+    assert!(issues.contains(&column(TableId::Field, 1, "signature")));
 }
 
 #[test]
